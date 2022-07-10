@@ -1,0 +1,87 @@
+{
+	"name": "fuzzy-ruby-server",
+	"displayName": "Fuzzy Ruby Server",
+	"description": "Fuzzy Ruby Server",
+	"icon": "images/icon.png",
+	"author": "Joel Korpela",
+	"license": "MIT",
+	"version": "0.0.1",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pheen/fuzzy_ruby_server"
+	},
+	"publisher": "Blinknlights",
+	"categories": [
+		"Programming Languages"
+	],
+	"keywords": [
+		"ruby",
+		"language",
+		"server",
+		"definition",
+		"goto"
+	],
+	"engines": {
+		"vscode": "^1.67.0"
+	},
+	"activationEvents": [
+		"onLanguage:ruby"
+	],
+	"main": "./client/out/extension",
+	"contributes": {
+		"commands": [
+			{
+				"command": "fuzzyRubyServer.reindexWorkspace",
+				"title": "Fuzzy Ruby Server: Reindex Workspace"
+			},
+			{
+				"command": "fuzzyRubyServer.reindexGems",
+				"title": "Fuzzy Ruby Server: Reindex Gems"
+			},
+			{
+				"command": "fuzzyRubyServer.stopServer",
+				"title": "Fuzzy Ruby Server: Stop Server"
+			}
+		],
+		"configuration": {
+			"type": "object",
+			"title": "Fuzzy Ruby Server",
+			"properties": {
+				"fuzzyRubyServer.port": {
+					"scope": "window",
+					"type": "integer",
+					"default": 8341,
+					"description": "The port used by the client and server."
+				},
+				"fuzzyRubyServer.logLevel": {
+					"scope": "window",
+					"type": "string",
+					"enum": [
+						"error",
+						"warn",
+						"info",
+						"debug"
+					],
+					"default": "error",
+					"description": "Controls the logging level for the server."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -b",
+		"watch": "tsc -b -w",
+		"postinstall": "cd client && npm install && cd ..",
+		"test": "sh ./scripts/e2e.sh"
+	},
+	"devDependencies": {
+		"@types/mocha": "^8.2.2",
+		"@types/node": "^16.0.0",
+		"@typescript-eslint/eslint-plugin": "^4.23.0",
+		"@typescript-eslint/parser": "^4.23.0",
+		"eslint": "^7.26.0",
+		"mocha": "^10.0.0",
+		"typescript": "^4.6.4"
+	}
+}
