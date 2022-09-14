@@ -42,9 +42,9 @@ let client: LanguageClient;
 
 export async function activate(context: ExtensionContext) {
 
-  const traceOutputChannel = window.createOutputChannel("Fuzzy Ruby Language Server trace");
+  // const traceOutputChannel = window.createOutputChannel("Fuzzy Ruby Language Server trace");
   // const command = process.env.SERVER_PATH || "fuzzy";
-  const command = "/Users/joelkorpela/dev/fuzzy/target/debug/fuzzy";
+  const command = "/Users/joelkorpela/dev/fuzzy_ruby_vscode_client/target/debug/fuzzy";
   const run: Executable = {
     command,
     options: {
@@ -67,13 +67,13 @@ export async function activate(context: ExtensionContext) {
     documentSelector: [{ scheme: "file", language: "ruby" }],
     synchronize: {
       // Notify the server about file changes to '.clientrc files contained in the workspace
-      fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
+      // fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
     },
-    traceOutputChannel,
+    // traceOutputChannel,
   };
 
   // Create the language client and start the client.
-  client = new LanguageClient("fuzzy-ruby-language-server", "ruby language server", serverOptions, clientOptions);
+  client = new LanguageClient("fuzzy-ruby-language-server", "Fuzzy Ruby Language Server", serverOptions, clientOptions);
   // activateInlayHints(context);
   client.start();
 }
