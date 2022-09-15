@@ -31,6 +31,7 @@ pub struct Persistence {
 }
 
 struct SchemaFields {
+    file_path_id: Field,
     file_path: Field,
     category_field: Field,
     fuzzy_ruby_scope_field: Field,
@@ -57,6 +58,7 @@ impl Persistence {
     pub fn new() -> tantivy::Result<Persistence> {
         let mut schema_builder = Schema::builder();
         let schema_fields = SchemaFields {
+            file_path_id: schema_builder.add_text_field("file_path_id", TEXT | STORED),
             file_path: schema_builder.add_text_field("file_path", TEXT | STORED),
             category_field: schema_builder.add_text_field("category", TEXT | STORED),
             fuzzy_ruby_scope_field: schema_builder
@@ -98,6 +100,8 @@ impl Persistence {
         for document in documents {
             let mut fuzzy_doc = Document::default();
             let relative_path = text_document.uri.path().replace(&self.workspace_path, "");
+
+            fuzzy_doc.add_text(self.schema_fields.file_path_id, &relative_path);
 
             for path_part in relative_path.split("/") {
                 if path_part.len() > 0 {
@@ -147,7 +151,10 @@ impl Persistence {
     }
 
     pub fn find_definitions(&self, params: TextDocumentPositionParams) -> tantivy::Result<Vec<Location>> {
-        let uri = params.text_document.uri;
+        let uri = params.text_document.uri.path();
+        let relative_path = params.text_document.uri.path().replace(&self.workspace_path, "");
+        info!("{:#?}", relative_path);
+
         let position = params.position;
 
         let reader = self.index
@@ -156,18 +163,30 @@ impl Persistence {
             .try_into()?;
 
         let searcher = reader.searcher();
-        let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.name_field]);
+        let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
 
         let character_position = position.character;
         let character_line = position.line;
-        // let query_string = format!("(start_column:[0 to {character_position}}} AND end_column:[{character_position} to 10000}})");
-        let query_string = format!("line:{character_line} columns:{character_position}");
+        let query_string = format!("category:usage AND file_path_id:\"{relative_path}\" AND line:{character_line} AND columns:{character_position}");
         let query = query_parser.parse_query(&query_string)?;
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(10))?;
+        let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
         let mut locations = Vec::new();
 
-        for (_score, doc_address) in top_docs {
+        if usage_top_docs.len() == 0 {
+            return Ok(locations)
+        }
+
+        let doc_address = usage_top_docs[0].1;
+        let retrieved_doc = searcher.doc(doc_address)?;
+
+        let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
+        let usage_name = retrieved_doc.get_first(self.schema_fields.name_field).unwrap().as_text().unwrap();
+        let query_string = format!("category:assignment AND name:\"{usage_name}\"");
+        let query = query_parser.parse_query(&query_string)?;
+        let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
+
+        for (_score, doc_address) in assignments_top_docs {
             let retrieved_doc = searcher.doc(doc_address)?;
 
             info!("retrieved doc:");
@@ -189,8 +208,12 @@ impl Persistence {
             let end_position = Position::new(start_line, end_column);
 
             let doc_range = Range::new(start_position, end_position);
+            let location = Location::new(doc_uri, doc_range);
 
-            locations.push(Location::new(doc_uri, doc_range));
+            info!("location:");
+            info!("{:#?}", location);
+
+            locations.push(location);
         }
 
         Ok(locations)
@@ -234,9 +257,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: sym.name.to_string_lossy(),
                     node_type: "Alias",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
 
@@ -249,9 +272,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: sym.name.to_string_lossy(),
                     node_type: "Alias",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
         }
@@ -275,9 +298,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Arg",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -394,9 +417,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Casgn",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = scope {
@@ -428,9 +451,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: class_name.clone(),
                     node_type: "Class",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
 
                 fuzzy_scope.push(class_name);
@@ -464,9 +487,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Const",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = scope {
@@ -497,9 +520,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: method_name.to_string(),
                     node_type: "CSend",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
 
@@ -519,9 +542,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Cvar",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -539,9 +562,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Cvasgn",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = value {
@@ -564,9 +587,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Def",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             fuzzy_scope.push(name.to_string());
@@ -601,9 +624,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Defs",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             let mut scope_name = "self.".to_owned();
@@ -700,9 +723,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Gvar",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -720,9 +743,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Gvasgn",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = value {
@@ -869,9 +892,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Ivar",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -889,9 +912,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Ivasgn",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = value {
@@ -908,9 +931,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Kwarg",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -941,9 +964,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Kwoptarg",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             serialize(default, documents, fuzzy_scope, input);
@@ -960,9 +983,9 @@ fn serialize(
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
                         name: node_name.to_string(),
                         node_type: "Kwrestarg",
-                        line: lineno + 1,
-                        start_column: begin_pos + 1,
-                        end_column: end_pos + 1,
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
                     });
                 }
             }
@@ -983,9 +1006,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Lvar",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -1003,9 +1026,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Lvasgn",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             if let Some(child_node) = value {
@@ -1058,9 +1081,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "MatchVar",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -1089,9 +1112,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: class_name.clone(),
                     node_type: "Module",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
 
                 fuzzy_scope.push(class_name);
@@ -1136,9 +1159,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Optarg",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
 
             serialize(default, documents, fuzzy_scope, input);
@@ -1238,9 +1261,9 @@ fn serialize(
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
                         name: name_str.to_string(),
                         node_type: "Restarg",
-                        line: lineno + 1,
-                        start_column: begin_pos + 1,
-                        end_column: end_pos + 1,
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
                     });
                 }
             }
@@ -1282,9 +1305,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: method_name.to_string(),
                     node_type: "Send",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
 
@@ -1302,9 +1325,9 @@ fn serialize(
                 fuzzy_ruby_scope: fuzzy_scope.clone(),
                 name: name.to_string(),
                 node_type: "Shadowarg",
-                line: lineno + 1,
-                start_column: begin_pos + 1,
-                end_column: end_pos + 1,
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
             });
         }
 
@@ -1327,9 +1350,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: last_scope_name.to_string(),
                     node_type: "Super",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
 
@@ -1414,9 +1437,9 @@ fn serialize(
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
                     name: last_scope_name.to_string(),
                     node_type: "ZSuper",
-                    line: lineno + 1,
-                    start_column: begin_pos + 1,
-                    end_column: end_pos + 1,
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
                 });
             }
         }
