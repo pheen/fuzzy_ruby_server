@@ -67,6 +67,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 definition_provider: Some(OneOf::Left(true)),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -119,5 +120,19 @@ impl LanguageServer for Backend {
         }();
 
         Ok(definitions)
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let highlights_response = || -> Option<Vec<DocumentHighlight>> {
+            let highlights = self.persistence.lock().unwrap().find_highlights(params.text_document_position_params);
+            let highlights = highlights.unwrap();
+
+            Some(highlights)
+        }();
+
+        Ok(highlights_response)
     }
 }
