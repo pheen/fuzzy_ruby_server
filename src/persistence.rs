@@ -33,7 +33,7 @@ use walkdir::WalkDir;
 pub struct Persistence {
     schema: Schema,
     schema_fields: SchemaFields,
-    index: Index,
+    index: Option<Index>,
     workspace_path: String,
 }
 
@@ -253,7 +253,7 @@ impl Persistence {
         };
 
         let schema = schema_builder.build();
-        let index = Index::create_in_ram(schema.clone());
+        let index = None;
         let workspace_path = "".to_string();
 
         Ok(Self {
@@ -267,6 +267,17 @@ impl Persistence {
     pub fn set_workspace_path(&mut self, root_uri: Option<tower_lsp::lsp_types::Url>) {
         if let Some(uri) = root_uri {
             self.workspace_path = uri.path().to_string();
+
+            let workspace_id = blake3::hash(&self.workspace_path.as_bytes());
+            let index_path = format!("~/.fuzzy_ruby_server/{}", workspace_id);
+
+            fs::create_dir_all(&index_path);
+
+            let directory = tantivy::directory::MmapDirectory::open(&index_path).unwrap();
+
+            if let Ok(index) = Index::open_or_create(directory, self.schema.clone()) {
+                self.index = Some(index);
+            }
         }
     }
 
@@ -277,74 +288,78 @@ impl Persistence {
         text: &String,
         uri: &Url,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
-        let mut index_writer = self.index.writer(50_000_000)?;
-        let mut documents = Vec::new();
+        if let Some(index) = &self.index {
+            let mut index_writer = index.writer(50_000_000)?;
+            let mut documents = Vec::new();
 
-        let diagnostics = match parse(text, &mut documents) {
-            Ok(diagnostics) => diagnostics,
-            Err(diagnostics) => {
-                // Return early so existing documents are not deleted when there is a syntax error
-                return Ok(diagnostics);
-            }
-        };
-
-        let relative_path = uri.path().replace(&self.workspace_path, "");
-        let file_path_id = blake3::hash(&relative_path.as_bytes());
-
-        let file_path_id_term =
-            Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
-        index_writer.delete_term(file_path_id_term);
-
-        for document in documents {
-            let mut fuzzy_doc = Document::default();
-
-            fuzzy_doc.add_text(self.schema_fields.file_path_id, &file_path_id.to_string());
-
-            for path_part in relative_path.split("/") {
-                if path_part.len() > 0 {
-                    fuzzy_doc.add_text(self.schema_fields.file_path, path_part);
+            let diagnostics = match parse(text, &mut documents) {
+                Ok(diagnostics) => diagnostics,
+                Err(diagnostics) => {
+                    // Return early so existing documents are not deleted when there is a syntax error
+                    return Ok(diagnostics);
                 }
+            };
+
+            let relative_path = uri.path().replace(&self.workspace_path, "");
+            let file_path_id = blake3::hash(&relative_path.as_bytes());
+
+            let file_path_id_term =
+                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+            index_writer.delete_term(file_path_id_term);
+
+            for document in documents {
+                let mut fuzzy_doc = Document::default();
+
+                fuzzy_doc.add_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+
+                for path_part in relative_path.split("/") {
+                    if path_part.len() > 0 {
+                        fuzzy_doc.add_text(self.schema_fields.file_path, path_part);
+                    }
+                }
+
+                for fuzzy_scope in document.fuzzy_ruby_scope {
+                    fuzzy_doc.add_text(self.schema_fields.fuzzy_ruby_scope_field, fuzzy_scope);
+                }
+
+                fuzzy_doc.add_text(
+                    self.schema_fields.category_field,
+                    document.category.to_string(),
+                );
+                fuzzy_doc.add_text(self.schema_fields.name_field, document.name);
+                fuzzy_doc.add_text(self.schema_fields.node_type_field, document.node_type);
+                fuzzy_doc.add_u64(
+                    self.schema_fields.line_field,
+                    document.line.try_into().unwrap(),
+                );
+                fuzzy_doc.add_u64(
+                    self.schema_fields.start_column_field,
+                    document.start_column.try_into().unwrap(),
+                );
+                fuzzy_doc.add_u64(
+                    self.schema_fields.end_column_field,
+                    document.end_column.try_into().unwrap(),
+                );
+
+                let start_col = document.start_column;
+                let end_col = document.end_column;
+                let col_range = start_col..(end_col + 1);
+                for col in col_range {
+                    fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
+                }
+
+                info!("fuzzy_doc:");
+                info!("{:#?}", fuzzy_doc);
+
+                index_writer.add_document(fuzzy_doc)?;
             }
 
-            for fuzzy_scope in document.fuzzy_ruby_scope {
-                fuzzy_doc.add_text(self.schema_fields.fuzzy_ruby_scope_field, fuzzy_scope);
-            }
+            index_writer.commit()?;
 
-            fuzzy_doc.add_text(
-                self.schema_fields.category_field,
-                document.category.to_string(),
-            );
-            fuzzy_doc.add_text(self.schema_fields.name_field, document.name);
-            fuzzy_doc.add_text(self.schema_fields.node_type_field, document.node_type);
-            fuzzy_doc.add_u64(
-                self.schema_fields.line_field,
-                document.line.try_into().unwrap(),
-            );
-            fuzzy_doc.add_u64(
-                self.schema_fields.start_column_field,
-                document.start_column.try_into().unwrap(),
-            );
-            fuzzy_doc.add_u64(
-                self.schema_fields.end_column_field,
-                document.end_column.try_into().unwrap(),
-            );
-
-            let start_col = document.start_column;
-            let end_col = document.end_column;
-            let col_range = start_col..(end_col + 1);
-            for col in col_range {
-                fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
-            }
-
-            info!("fuzzy_doc:");
-            info!("{:#?}", fuzzy_doc);
-
-            index_writer.add_document(fuzzy_doc)?;
+            Ok(diagnostics)
+        } else {
+            Ok(vec![])
         }
-
-        index_writer.commit()?;
-
-        Ok(diagnostics)
     }
 
     pub fn find_definitions(
@@ -361,200 +376,208 @@ impl Persistence {
 
         let position = params.position;
 
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
-            .try_into()?;
+        if let Some(index) = &self.index {
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommit)
+                .try_into()?;
 
-        let searcher = reader.searcher();
-        // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
+            let searcher = reader.searcher();
+            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
 
-        let character_position = position.character;
-        let character_line = position.line;
-        // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
-        // let query = query_parser.parse_query(&query_string)?;
+            let character_position = position.character;
+            let character_line = position.line;
+            // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
+            // let query = query_parser.parse_query(&query_string)?;
 
-        let file_path_id = blake3::hash(&relative_path.as_bytes());
+            let file_path_id = blake3::hash(&relative_path.as_bytes());
 
-        info!("file_path_id:");
-        info!("{}", &file_path_id);
+            info!("file_path_id:");
+            info!("{}", &file_path_id);
 
-        let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
-            IndexRecordOption::Basic,
-        ));
-        let category_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.category_field, "usage"),
-            IndexRecordOption::Basic,
-        ));
-        let line_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_u64(self.schema_fields.line_field, character_line.into()),
-            IndexRecordOption::Basic,
-        ));
-        let column_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_u64(self.schema_fields.columns_field, character_position.into()),
-            IndexRecordOption::Basic,
-        ));
-
-        info!("{:#?}", file_path_query);
-
-        let query = BooleanQuery::new(vec![
-            (Occur::Must, file_path_query),
-            (Occur::Must, category_query),
-            (Occur::Must, line_query),
-            (Occur::Must, column_query),
-        ]);
-
-        let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
-
-        let mut locations = Vec::new();
-
-        if usage_top_docs.len() == 0 {
-            info!("No usages docs found");
-            return Ok(locations);
-        }
-
-        let doc_address = usage_top_docs[0].1;
-        let retrieved_doc = searcher.doc(doc_address)?;
-
-        info!("retrieved usage doc:");
-        info!("{}", self.schema.to_json(&retrieved_doc));
-
-        let category_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.category_field, "assignment"),
-            IndexRecordOption::Basic,
-        ));
-
-        let usage_name = retrieved_doc
-            .get_first(self.schema_fields.name_field)
-            .unwrap()
-            .as_text()
-            .unwrap();
-        let usage_type = retrieved_doc
-            .get_first(self.schema_fields.node_type_field)
-            .unwrap()
-            .as_text()
-            .unwrap();
-
-        let name_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.name_field, usage_name),
-            IndexRecordOption::Basic,
-        ));
-
-        let mut assignment_type_queries = vec![];
-
-        for possible_assignment_type in USAGE_TYPE_RESTRICTIONS.get(usage_type).unwrap().iter() {
-            let assignment_type_query: Box<dyn Query> = Box::new(TermQuery::new(
-                Term::from_field_text(self.schema_fields.node_type_field, possible_assignment_type),
+            let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
+                IndexRecordOption::Basic,
+            ));
+            let category_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.category_field, "usage"),
+                IndexRecordOption::Basic,
+            ));
+            let line_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_u64(self.schema_fields.line_field, character_line.into()),
+                IndexRecordOption::Basic,
+            ));
+            let column_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_u64(self.schema_fields.columns_field, character_position.into()),
                 IndexRecordOption::Basic,
             ));
 
-            assignment_type_queries.push((Occur::Should, assignment_type_query));
-        }
+            info!("{:#?}", file_path_query);
 
-        let assignment_type_query = BooleanQuery::new(assignment_type_queries);
+            let query = BooleanQuery::new(vec![
+                (Occur::Must, file_path_query),
+                (Occur::Must, category_query),
+                (Occur::Must, line_query),
+                (Occur::Must, column_query),
+            ]);
 
-        let mut queries = vec![
-            (Occur::Must, category_query),
-            (Occur::Must, name_query),
-            (Occur::Must, Box::new(assignment_type_query)),
-        ];
+            let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
-        let usage_fuzzy_scope = retrieved_doc.get_all(self.schema_fields.fuzzy_ruby_scope_field);
+            let mut locations = Vec::new();
 
-        match usage_type {
-            // "Alias" => {},
-            // "Const" => {},
-            // "CSend" => {},
-            // todo: improved indexed scopes so there is a separate class scope, etc
-            // "Cvar" => {},
-            // "Gvar" => {},
-            // todo: improved indexed scopes so there is a separate class scope, etc
-            // "Ivar" => {},
-            // todo: improved to be more accurate
-            "Lvar" => {
-                for scope_name in usage_fuzzy_scope {
-                    let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
-                        Term::from_field_text(
-                            self.schema_fields.fuzzy_ruby_scope_field,
-                            scope_name.as_text().unwrap(),
-                        ),
-                        IndexRecordOption::Basic,
-                    ));
-
-                    queries.push((Occur::Must, scope_query));
-                }
+            if usage_top_docs.len() == 0 {
+                info!("No usages docs found");
+                return Ok(locations);
             }
-            // "Send" => {},
-            // "Super" => {},
-            // "ZSuper" => {},
-            _ => {
-                for scope_name in usage_fuzzy_scope {
-                    let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
-                        Term::from_field_text(
-                            self.schema_fields.fuzzy_ruby_scope_field,
-                            scope_name.as_text().unwrap(),
-                        ),
-                        IndexRecordOption::Basic,
-                    ));
 
-                    queries.push((Occur::Should, scope_query));
-                }
-            }
-        };
-
-        let query = BooleanQuery::new(queries);
-        let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
-
-        // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
-        // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
-        // let query = query_parser.parse_query(&query_string)?;
-        // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
-
-        for (_score, doc_address) in assignments_top_docs {
+            let doc_address = usage_top_docs[0].1;
             let retrieved_doc = searcher.doc(doc_address)?;
 
-            info!("retrieved doc:");
+            info!("retrieved usage doc:");
             info!("{}", self.schema.to_json(&retrieved_doc));
 
-            let file_path: String = retrieved_doc
-                .get_all(self.schema_fields.file_path)
-                .flat_map(Value::as_text)
-                .collect::<Vec<&str>>()
-                .join("/");
+            let category_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.category_field, "assignment"),
+                IndexRecordOption::Basic,
+            ));
 
-            let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
-            let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
-
-            let start_line = retrieved_doc
-                .get_first(self.schema_fields.line_field)
+            let usage_name = retrieved_doc
+                .get_first(self.schema_fields.name_field)
                 .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let start_column = retrieved_doc
-                .get_first(self.schema_fields.start_column_field)
+                .as_text()
+                .unwrap();
+            let usage_type = retrieved_doc
+                .get_first(self.schema_fields.node_type_field)
                 .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let start_position = Position::new(start_line, start_column);
-            let end_column = retrieved_doc
-                .get_first(self.schema_fields.end_column_field)
-                .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let end_position = Position::new(start_line, end_column);
+                .as_text()
+                .unwrap();
 
-            let doc_range = Range::new(start_position, end_position);
-            let location = Location::new(doc_uri, doc_range);
+            let name_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.name_field, usage_name),
+                IndexRecordOption::Basic,
+            ));
 
-            info!("location:");
-            info!("{:#?}", location);
+            let mut assignment_type_queries = vec![];
 
-            locations.push(location);
+            for possible_assignment_type in USAGE_TYPE_RESTRICTIONS.get(usage_type).unwrap().iter()
+            {
+                let assignment_type_query: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(
+                        self.schema_fields.node_type_field,
+                        possible_assignment_type,
+                    ),
+                    IndexRecordOption::Basic,
+                ));
+
+                assignment_type_queries.push((Occur::Should, assignment_type_query));
+            }
+
+            let assignment_type_query = BooleanQuery::new(assignment_type_queries);
+
+            let mut queries = vec![
+                (Occur::Must, category_query),
+                (Occur::Must, name_query),
+                (Occur::Must, Box::new(assignment_type_query)),
+            ];
+
+            let usage_fuzzy_scope =
+                retrieved_doc.get_all(self.schema_fields.fuzzy_ruby_scope_field);
+
+            match usage_type {
+                // "Alias" => {},
+                // "Const" => {},
+                // "CSend" => {},
+                // todo: improved indexed scopes so there is a separate class scope, etc
+                // "Cvar" => {},
+                // "Gvar" => {},
+                // todo: improved indexed scopes so there is a separate class scope, etc
+                // "Ivar" => {},
+                // todo: improved to be more accurate
+                "Lvar" => {
+                    for scope_name in usage_fuzzy_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Must, scope_query));
+                    }
+                }
+                // "Send" => {},
+                // "Super" => {},
+                // "ZSuper" => {},
+                _ => {
+                    for scope_name in usage_fuzzy_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Should, scope_query));
+                    }
+                }
+            };
+
+            let query = BooleanQuery::new(queries);
+            let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
+
+            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
+            // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
+            // let query = query_parser.parse_query(&query_string)?;
+            // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
+
+            for (_score, doc_address) in assignments_top_docs {
+                let retrieved_doc = searcher.doc(doc_address)?;
+
+                info!("retrieved doc:");
+                info!("{}", self.schema.to_json(&retrieved_doc));
+
+                let file_path: String = retrieved_doc
+                    .get_all(self.schema_fields.file_path)
+                    .flat_map(Value::as_text)
+                    .collect::<Vec<&str>>()
+                    .join("/");
+
+                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
+                let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
+
+                let start_line = retrieved_doc
+                    .get_first(self.schema_fields.line_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_column = retrieved_doc
+                    .get_first(self.schema_fields.start_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_position = Position::new(start_line, start_column);
+                let end_column = retrieved_doc
+                    .get_first(self.schema_fields.end_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let end_position = Position::new(start_line, end_column);
+
+                let doc_range = Range::new(start_position, end_position);
+                let location = Location::new(doc_uri, doc_range);
+
+                info!("location:");
+                info!("{:#?}", location);
+
+                locations.push(location);
+            }
+
+            Ok(locations)
+        } else {
+            Ok(vec![])
         }
-
-        Ok(locations)
     }
 
     pub fn find_highlights(
@@ -570,222 +593,229 @@ impl Persistence {
 
         let position = params.position;
 
-        let reader = self
-            .index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommit)
-            .try_into()?;
+        if let Some(index) = &self.index {
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommit)
+                .try_into()?;
 
-        let searcher = reader.searcher();
-        // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
+            let searcher = reader.searcher();
+            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
 
-        let character_position = position.character;
-        let character_line = position.line;
-        // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
-        // let query = query_parser.parse_query(&query_string)?;
+            let character_position = position.character;
+            let character_line = position.line;
+            // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
+            // let query = query_parser.parse_query(&query_string)?;
 
-        let file_path_id = blake3::hash(&relative_path.as_bytes());
+            let file_path_id = blake3::hash(&relative_path.as_bytes());
 
-        info!("file_path_id:");
-        info!("{}", &file_path_id);
+            info!("file_path_id:");
+            info!("{}", &file_path_id);
 
-        let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
-            IndexRecordOption::Basic,
-        ));
-        let line_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_u64(self.schema_fields.line_field, character_line.into()),
-            IndexRecordOption::Basic,
-        ));
-        let column_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_u64(self.schema_fields.columns_field, character_position.into()),
-            IndexRecordOption::Basic,
-        ));
-
-        let query = BooleanQuery::new(vec![
-            (Occur::Must, file_path_query),
-            (Occur::Must, line_query),
-            (Occur::Must, column_query),
-        ]);
-
-        let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
-
-        let mut highlights = Vec::new();
-
-        if usage_top_docs.len() == 0 {
-            info!("No highlight usages docs found");
-            return Ok(highlights);
-        }
-
-        let doc_address = usage_top_docs[0].1;
-        let retrieved_doc = searcher.doc(doc_address)?;
-
-        // info!("retrieved highlight usage doc:");
-        // info!("{}", self.schema.to_json(&retrieved_doc));
-
-        let usage_name = retrieved_doc
-            .get_first(self.schema_fields.name_field)
-            .unwrap()
-            .as_text()
-            .unwrap();
-        let token_type = retrieved_doc
-            .get_first(self.schema_fields.node_type_field)
-            .unwrap()
-            .as_text()
-            .unwrap();
-
-        let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
-            IndexRecordOption::Basic,
-        ));
-
-        let name_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.name_field, usage_name),
-            IndexRecordOption::Basic,
-        ));
-
-        let mut highlight_token_queries = vec![];
-
-        for possible_assignment_type in USAGE_TYPE_RESTRICTIONS
-            .get(token_type)
-            .unwrap_or(&[].as_slice())
-            .iter()
-        {
-            let assignment_type_query: Box<dyn Query> = Box::new(TermQuery::new(
-                Term::from_field_text(self.schema_fields.node_type_field, possible_assignment_type),
+            let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
+                IndexRecordOption::Basic,
+            ));
+            let line_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_u64(self.schema_fields.line_field, character_line.into()),
+                IndexRecordOption::Basic,
+            ));
+            let column_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_u64(self.schema_fields.columns_field, character_position.into()),
                 IndexRecordOption::Basic,
             ));
 
-            highlight_token_queries.push((Occur::Should, assignment_type_query));
-        }
-        for possible_usage_type in ASSIGNMENT_TYPE_RESTRICTIONS
-            .get(token_type)
-            .unwrap_or(&[].as_slice())
-            .iter()
-        {
-            let usage_type_query: Box<dyn Query> = Box::new(TermQuery::new(
-                Term::from_field_text(self.schema_fields.node_type_field, possible_usage_type),
-                IndexRecordOption::Basic,
-            ));
+            let query = BooleanQuery::new(vec![
+                (Occur::Must, file_path_query),
+                (Occur::Must, line_query),
+                (Occur::Must, column_query),
+            ]);
 
-            highlight_token_queries.push((Occur::Should, usage_type_query));
-        }
+            let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
-        let token_type_query = BooleanQuery::new(highlight_token_queries);
+            let mut highlights = Vec::new();
 
-        let mut queries = vec![
-            (Occur::Must, file_path_query),
-            (Occur::Must, name_query),
-            (Occur::Must, Box::new(token_type_query)),
-        ];
-
-        let usage_fuzzy_scope = retrieved_doc.get_all(self.schema_fields.fuzzy_ruby_scope_field);
-
-        match token_type {
-            // "Alias" => {},
-            // "Const" => {},
-            // "CSend" => {},
-            // todo: improved indexed scopes so there is a separate class scope, etc
-            // "Cvar" => {},
-            // "Gvar" => {},
-            // todo: improved indexed scopes so there is a separate class scope, etc
-            // "Ivar" => {},
-            // todo: improved to be more accurate
-            "Lvar" => {
-                for scope_name in usage_fuzzy_scope {
-                    let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
-                        Term::from_field_text(
-                            self.schema_fields.fuzzy_ruby_scope_field,
-                            scope_name.as_text().unwrap(),
-                        ),
-                        IndexRecordOption::Basic,
-                    ));
-
-                    queries.push((Occur::Must, scope_query));
-                }
+            if usage_top_docs.len() == 0 {
+                info!("No highlight usages docs found");
+                return Ok(highlights);
             }
-            // "Send" => {},
-            // "Super" => {},
-            // "ZSuper" => {},
-            _ => {
-                for scope_name in usage_fuzzy_scope {
-                    let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
-                        Term::from_field_text(
-                            self.schema_fields.fuzzy_ruby_scope_field,
-                            scope_name.as_text().unwrap(),
-                        ),
-                        IndexRecordOption::Basic,
-                    ));
 
-                    queries.push((Occur::Should, scope_query));
-                }
-            }
-        };
-
-        let query = BooleanQuery::new(queries);
-        let top_docs = searcher.search(&query, &TopDocs::with_limit(100))?;
-
-        // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
-        // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
-        // let query = query_parser.parse_query(&query_string)?;
-        // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
-
-        for (_score, doc_address) in top_docs {
+            let doc_address = usage_top_docs[0].1;
             let retrieved_doc = searcher.doc(doc_address)?;
 
-            // info!("retrieved doc:");
+            // info!("retrieved highlight usage doc:");
             // info!("{}", self.schema.to_json(&retrieved_doc));
 
-            let file_path: String = retrieved_doc
-                .get_all(self.schema_fields.file_path)
-                .flat_map(Value::as_text)
-                .collect::<Vec<&str>>()
-                .join("/");
-
-            let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
-            let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
-
-            let start_line = retrieved_doc
-                .get_first(self.schema_fields.line_field)
+            let usage_name = retrieved_doc
+                .get_first(self.schema_fields.name_field)
                 .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let start_column = retrieved_doc
-                .get_first(self.schema_fields.start_column_field)
-                .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let start_position = Position::new(start_line, start_column);
-            let end_column = retrieved_doc
-                .get_first(self.schema_fields.end_column_field)
-                .unwrap()
-                .as_u64()
-                .unwrap() as u32;
-            let end_position = Position::new(start_line, end_column);
-
-            let range = Range::new(start_position, end_position);
-
-            let category = retrieved_doc
-                .get_first(self.schema_fields.category_field)
+                .as_text()
+                .unwrap();
+            let token_type = retrieved_doc
+                .get_first(self.schema_fields.node_type_field)
                 .unwrap()
                 .as_text()
                 .unwrap();
 
-            let kind = if category == "assignment" {
-                Some(DocumentHighlightKind::WRITE)
-            } else {
-                Some(DocumentHighlightKind::READ)
+            let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
+                IndexRecordOption::Basic,
+            ));
+
+            let name_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_text(self.schema_fields.name_field, usage_name),
+                IndexRecordOption::Basic,
+            ));
+
+            let mut highlight_token_queries = vec![];
+
+            for possible_assignment_type in USAGE_TYPE_RESTRICTIONS
+                .get(token_type)
+                .unwrap_or(&[].as_slice())
+                .iter()
+            {
+                let assignment_type_query: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(
+                        self.schema_fields.node_type_field,
+                        possible_assignment_type,
+                    ),
+                    IndexRecordOption::Basic,
+                ));
+
+                highlight_token_queries.push((Occur::Should, assignment_type_query));
+            }
+            for possible_usage_type in ASSIGNMENT_TYPE_RESTRICTIONS
+                .get(token_type)
+                .unwrap_or(&[].as_slice())
+                .iter()
+            {
+                let usage_type_query: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema_fields.node_type_field, possible_usage_type),
+                    IndexRecordOption::Basic,
+                ));
+
+                highlight_token_queries.push((Occur::Should, usage_type_query));
+            }
+
+            let token_type_query = BooleanQuery::new(highlight_token_queries);
+
+            let mut queries = vec![
+                (Occur::Must, file_path_query),
+                (Occur::Must, name_query),
+                (Occur::Must, Box::new(token_type_query)),
+            ];
+
+            let usage_fuzzy_scope =
+                retrieved_doc.get_all(self.schema_fields.fuzzy_ruby_scope_field);
+
+            match token_type {
+                // "Alias" => {},
+                // "Const" => {},
+                // "CSend" => {},
+                // todo: improved indexed scopes so there is a separate class scope, etc
+                // "Cvar" => {},
+                // "Gvar" => {},
+                // todo: improved indexed scopes so there is a separate class scope, etc
+                // "Ivar" => {},
+                // todo: improved to be more accurate
+                "Lvar" => {
+                    for scope_name in usage_fuzzy_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Must, scope_query));
+                    }
+                }
+                // "Send" => {},
+                // "Super" => {},
+                // "ZSuper" => {},
+                _ => {
+                    for scope_name in usage_fuzzy_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Should, scope_query));
+                    }
+                }
             };
 
-            let document_highlight = DocumentHighlight { range, kind };
+            let query = BooleanQuery::new(queries);
+            let top_docs = searcher.search(&query, &TopDocs::with_limit(100))?;
 
-            // info!("location:");
-            // info!("{:#?}", location);
+            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
+            // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
+            // let query = query_parser.parse_query(&query_string)?;
+            // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
 
-            highlights.push(document_highlight);
+            for (_score, doc_address) in top_docs {
+                let retrieved_doc = searcher.doc(doc_address)?;
+
+                // info!("retrieved doc:");
+                // info!("{}", self.schema.to_json(&retrieved_doc));
+
+                let file_path: String = retrieved_doc
+                    .get_all(self.schema_fields.file_path)
+                    .flat_map(Value::as_text)
+                    .collect::<Vec<&str>>()
+                    .join("/");
+
+                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
+                let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
+
+                let start_line = retrieved_doc
+                    .get_first(self.schema_fields.line_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_column = retrieved_doc
+                    .get_first(self.schema_fields.start_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_position = Position::new(start_line, start_column);
+                let end_column = retrieved_doc
+                    .get_first(self.schema_fields.end_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let end_position = Position::new(start_line, end_column);
+
+                let range = Range::new(start_position, end_position);
+
+                let category = retrieved_doc
+                    .get_first(self.schema_fields.category_field)
+                    .unwrap()
+                    .as_text()
+                    .unwrap();
+
+                let kind = if category == "assignment" {
+                    Some(DocumentHighlightKind::WRITE)
+                } else {
+                    Some(DocumentHighlightKind::READ)
+                };
+
+                let document_highlight = DocumentHighlight { range, kind };
+
+                // info!("location:");
+                // info!("{:#?}", location);
+
+                highlights.push(document_highlight);
+            }
+
+            Ok(highlights)
+        } else {
+            Ok(vec![])
         }
-
-        Ok(highlights)
     }
 }
 
