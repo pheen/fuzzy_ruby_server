@@ -27,7 +27,7 @@ use std::ops::AddAssign;
 use std::path::Path;
 
 use filetime::FileTime;
-use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
+use lib_ruby_parser::{nodes::*, Diagnostic, Node, Parser, ParserOptions};
 use walkdir::WalkDir;
 
 pub struct Persistence {
@@ -64,37 +64,121 @@ struct FuzzyNode<'a> {
 use phf::phf_map;
 
 static USAGE_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
-    "Alias" => &["Alias", "Def", "Defs"],
-    "Const" => &["Casgn", "Class", "Module"],
-    "CSend" => &["Alias", "Def", "Defs"],
-    "Cvar" => &["Cvasgn"],
-    "Gvar" => &["Gvasgn"],
-    "Ivar" => &["Ivasgn"],
-    "Lvar" => &["Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"],
-    "Send" => &["Alias", "Def", "Defs"],
-    "Super" => &["Alias", "Def", "Defs"],
-    "ZSuper" => &["Alias", "Def", "Defs"],
+    "Alias" => &[
+        "Alias", "Def", "Defs",
+        "CSend", "Send", "Super", "ZSuper",
+    ],
+    "Const" => &[
+        "Casgn", "Class", "Module",
+        "Const"
+    ],
+    "CSend" => &[
+        "Alias", "Def", "Defs",
+        "CSend", "Send", "Super", "ZSuper",
+    ],
+    "Cvar" => &[
+        "Cvasgn",
+        "Cvar"
+    ],
+    "Gvar" => &[
+        "Gvasgn",
+        "Gvar"
+    ],
+    "Ivar" => &[
+        "Ivasgn",
+        "Ivar"
+    ],
+    "Lvar" => &[
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg",
+        "Lvar"
+    ],
+    "Send" => &[
+        "Alias", "Def", "Defs",
+        "CSend", "Send", "Super", "ZSuper",
+    ],
+    "Super" => &[
+        "Alias", "Def", "Defs",
+        "CSend", "Send", "Super", "ZSuper",
+    ],
+    "ZSuper" => &[
+        "Alias", "Def", "Defs",
+        "CSend", "Send", "Super", "ZSuper",
+    ],
 };
 
 static ASSIGNMENT_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
-    "Alias" => &["Alias", "CSend", "Send", "Super", "ZSuper"],
-    "Arg" => &["Lvar"],
-    "Casgn" => &["Const"],
-    "Class" => &["Const"],
-    "Cvasgn" => &["Cvar"],
-    "Def" => &["Alias", "CSend", "Send", "Super", "ZSuper"],
-    "Defs" => &["Alias", "CSend", "Send", "Super", "ZSuper"],
-    "Gvasgn" => &["Gvar"],
-    "Ivasgn" => &["Ivar"],
-    "Kwarg" => &["Lvar"],
-    "Kwoptarg" => &["Lvar"],
-    "Kwrestarg" => &["Lvar"],
-    "Lvasgn" => &["Lvar"],
-    "MatchVar" => &["Lvar"],
-    "Module" => &["Const"],
-    "Optarg" => &["Lvar"],
-    "Restarg" => &["Lvar"],
-    "Shadowarg" => &["Lvar"],
+    "Alias" => &[
+        "Alias", "CSend", "Send", "Super", "ZSuper",
+        "Def", "Defs"
+    ],
+    "Arg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Casgn" => &[
+        "Const",
+        "Casgn", "Class", "Module"
+    ],
+    "Class" => &[
+        "Const",
+        "Casgn", "Class", "Module"
+    ],
+    "Cvasgn" => &[
+        "Cvar",
+        "Cvasgn"
+    ],
+    "Def" => &[
+        "Alias", "CSend", "Send", "Super", "ZSuper",
+        "Def"
+    ],
+    "Defs" => &[
+        "Alias", "CSend", "Send", "Super", "ZSuper",
+        "Defs"
+    ],
+    "Gvasgn" => &[
+        "Gvar",
+        "Gvasgn"
+    ],
+    "Ivasgn" => &[
+        "Ivar",
+        "Ivasgn"
+    ],
+    "Kwarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Kwoptarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Kwrestarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Lvasgn" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "MatchVar" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Module" => &[
+        "Const",
+        "Casgn", "Class", "Module"
+    ],
+    "Optarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Restarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
+    "Shadowarg" => &[
+        "Lvar",
+        "Arg", "Kwarg", "Kwoptarg", "Kwrestarg", "Lvasgn", "MatchVar", "Optarg", "Restarg", "Shadowarg"
+    ],
 };
 
 impl Persistence {
@@ -188,13 +272,23 @@ impl Persistence {
 
     pub fn reindex_modified_files(&self) {}
 
-    pub fn reindex_modified_file(&self, text_document: TextDocumentItem) -> tantivy::Result<()> {
+    pub fn reindex_modified_file(
+        &self,
+        text: &String,
+        uri: &Url,
+    ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         let mut index_writer = self.index.writer(50_000_000)?;
         let mut documents = Vec::new();
 
-        parse(text_document.text, &mut documents);
+        let diagnostics = match parse(text, &mut documents) {
+            Ok(diagnostics) => diagnostics,
+            Err(diagnostics) => {
+                // Return early so existing documents are not deleted when there is a syntax error
+                return Ok(diagnostics);
+            }
+        };
 
-        let relative_path = text_document.uri.path().replace(&self.workspace_path, "");
+        let relative_path = uri.path().replace(&self.workspace_path, "");
         let file_path_id = blake3::hash(&relative_path.as_bytes());
 
         let file_path_id_term =
@@ -250,7 +344,7 @@ impl Persistence {
 
         index_writer.commit()?;
 
-        Ok(())
+        Ok(diagnostics)
     }
 
     pub fn find_definitions(
@@ -577,13 +671,6 @@ impl Persistence {
             highlight_token_queries.push((Occur::Should, usage_type_query));
         }
 
-        let usage_type_query: Box<dyn Query> = Box::new(TermQuery::new(
-            Term::from_field_text(self.schema_fields.node_type_field, token_type),
-            IndexRecordOption::Basic,
-        ));
-
-        highlight_token_queries.push((Occur::Should, usage_type_query));
-
         let token_type_query = BooleanQuery::new(highlight_token_queries);
 
         let mut queries = vec![
@@ -702,24 +789,65 @@ impl Persistence {
     }
 }
 
-fn parse(contents: String, documents: &mut Vec<FuzzyNode>) {
+fn parse(
+    contents: &String,
+    documents: &mut Vec<FuzzyNode>,
+) -> Result<
+    Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
+    Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
+> {
     // let contents = fs::read_to_string(entry.path()).expect("Unable to read");
     let options = ParserOptions {
         buffer_name: "(eval)".to_string(),
         record_tokens: false,
         ..Default::default()
     };
-    let parser = Parser::new(contents, options);
+    let parser = Parser::new(contents.to_string(), options);
     let parser_result = parser.do_parse();
     let input = parser_result.input;
+
+    let mut diagnostics = vec![];
+
+    for parser_diagnostic in parser_result.diagnostics {
+        diagnostics.push(lsp_diagnostic(parser_diagnostic, &input));
+    }
+
     let ast = match parser_result.ast {
         Some(a) => *a,
-        None => return,
+        None => return Err(diagnostics),
     };
 
     let mut scope = Vec::new();
 
     serialize(&ast, documents, &mut scope, &input);
+
+    Ok(diagnostics)
+}
+
+fn lsp_diagnostic(
+    parser_diagnostic: lib_ruby_parser::Diagnostic,
+    input: &DecodedInput,
+) -> Option<tower_lsp::lsp_types::Diagnostic> {
+    let diagnostic = || -> Option<tower_lsp::lsp_types::Diagnostic> {
+        let (begin_lineno, start_column) =
+            input.line_col_for_pos(parser_diagnostic.loc.begin).unwrap();
+        let (end_lineno, end_column) = input.line_col_for_pos(parser_diagnostic.loc.end).unwrap();
+        let start_position = Position::new(
+            begin_lineno.try_into().unwrap(),
+            start_column.try_into().unwrap(),
+        );
+        let end_position = Position::new(
+            end_lineno.try_into().unwrap(),
+            end_column.try_into().unwrap(),
+        );
+
+        Some(tower_lsp::lsp_types::Diagnostic::new_simple(
+            Range::new(start_position, end_position),
+            parser_diagnostic.message.render(),
+        ))
+    }();
+
+    diagnostic
 }
 
 fn serialize(

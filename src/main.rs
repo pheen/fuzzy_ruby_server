@@ -2,7 +2,7 @@ mod persistence;
 
 use persistence::Persistence;
 
-use tower_lsp::jsonrpc::{Result, Response};
+use tower_lsp::jsonrpc::{Response, Result};
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -27,7 +27,9 @@ use log::info;
 // use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 // use walkdir::WalkDir;
 
-use std::sync::{Arc, Mutex};
+// use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() {
@@ -57,15 +59,26 @@ struct Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
-        self.persistence.lock().unwrap().set_workspace_path(params.root_uri);
-        // self.persistence.lock()
+        let mut persistence = self.persistence.lock().await;
+        persistence.set_workspace_path(params.root_uri);
 
         Ok(InitializeResult {
             server_info: None,
             capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
+                text_document_sync: Some(TextDocumentSyncCapability::Options(
+                    TextDocumentSyncOptions {
+                        open_close: Some(true),
+                        change: Some(TextDocumentSyncKind::FULL), // todo: incremental
+                        will_save: Some(false),
+                        will_save_wait_until: Some(false),
+                        save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                            include_text: Some(true),
+                        })),
+                    },
                 )),
+                // text_document_sync: Some(TextDocumentSyncCapability::Kind(
+                //     TextDocumentSyncKind::FULL,
+                // )),
                 definition_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
@@ -86,20 +99,44 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let persistence = self.persistence.lock().unwrap();
-        persistence.reindex_modified_file(params.text_document);
+        let persistence = self.persistence.lock().await;
+        persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
     }
 
-    async fn did_change(&self, _: DidChangeTextDocumentParams) {
+    async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        let persistence = self.persistence.lock().await;
+        let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
+
+        for content_change in &params.content_changes {
+            let change_diagnostics =
+                &persistence.reindex_modified_file(&content_change.text, &params.text_document.uri);
+
+            for diagnostic in change_diagnostics {
+                for unwrapped_diagnostic in diagnostic {
+                    if let Some(finally_diagnostic) = unwrapped_diagnostic {
+                        &diagnostics.push(finally_diagnostic.to_owned());
+                    }
+                }
+            }
+        }
+
         self.client
-            .log_message(MessageType::INFO, "file changed!")
+            .publish_diagnostics(
+                params.text_document.uri,
+                diagnostics,
+                Some(params.text_document.version),
+            )
             .await;
     }
 
-    async fn did_save(&self, _: DidSaveTextDocumentParams) {
+    async fn did_save(&self, params: DidSaveTextDocumentParams) {
         self.client
             .log_message(MessageType::INFO, "file saved!")
             .await;
+
+        let persistence = self.persistence.lock().await;
+        // persistence.reindex_modified_file(params.text.unwrap(), &params.text_document.uri);
+        persistence.reindex_modified_file(&params.text.unwrap(), &params.text_document.uri);
     }
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {
@@ -112,8 +149,9 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
+        let persistence = self.persistence.lock().await;
         let definitions = || -> Option<GotoDefinitionResponse> {
-            let locations = self.persistence.lock().unwrap().find_definitions(params.text_document_position_params);
+            let locations = persistence.find_definitions(params.text_document_position_params);
             let locations = locations.unwrap();
 
             Some(GotoDefinitionResponse::Array(locations))
@@ -126,8 +164,10 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentHighlightParams,
     ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let persistence = self.persistence.lock().await;
+
         let highlights_response = || -> Option<Vec<DocumentHighlight>> {
-            let highlights = self.persistence.lock().unwrap().find_highlights(params.text_document_position_params);
+            let highlights = persistence.find_highlights(params.text_document_position_params);
             let highlights = highlights.unwrap();
 
             Some(highlights)
