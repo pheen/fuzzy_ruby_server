@@ -100,7 +100,26 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let persistence = self.persistence.lock().await;
-        persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
+        let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
+
+        let change_diagnostics =
+            persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
+
+        for diagnostic in change_diagnostics {
+            for unwrapped_diagnostic in diagnostic {
+                if let Some(finally_diagnostic) = unwrapped_diagnostic {
+                    &diagnostics.push(finally_diagnostic.to_owned());
+                }
+            }
+        }
+
+        self.client
+            .publish_diagnostics(
+                params.text_document.uri,
+                diagnostics,
+                Some(params.text_document.version),
+            )
+            .await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -130,13 +149,26 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        self.client
-            .log_message(MessageType::INFO, "file saved!")
-            .await;
-
         let persistence = self.persistence.lock().await;
-        // persistence.reindex_modified_file(params.text.unwrap(), &params.text_document.uri);
-        persistence.reindex_modified_file(&params.text.unwrap(), &params.text_document.uri);
+        let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
+        let change_diagnostics =
+            persistence.reindex_modified_file(&params.text.unwrap(), &params.text_document.uri);
+
+        for diagnostic in change_diagnostics {
+            for unwrapped_diagnostic in diagnostic {
+                if let Some(finally_diagnostic) = unwrapped_diagnostic {
+                    &diagnostics.push(finally_diagnostic.to_owned());
+                }
+            }
+        }
+
+        self.client
+            .publish_diagnostics(
+                params.text_document.uri,
+                diagnostics,
+                None,
+            )
+            .await;
     }
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {
