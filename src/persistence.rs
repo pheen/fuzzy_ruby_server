@@ -7,6 +7,8 @@ use tower_lsp::lsp_types::{
 };
 use tower_lsp::Client;
 
+use home;
+use jwalk::WalkDirGeneric;
 // use ::phf::{phf_map, Map};
 
 // use std::fs::DirEntry;
@@ -28,7 +30,6 @@ use std::path::Path;
 
 use filetime::FileTime;
 use lib_ruby_parser::{nodes::*, Diagnostic, Node, Parser, ParserOptions};
-use walkdir::WalkDir;
 
 pub struct Persistence {
     schema: Schema,
@@ -268,20 +269,172 @@ impl Persistence {
         if let Some(uri) = root_uri {
             self.workspace_path = uri.path().to_string();
 
+            let home_dir = home::home_dir().unwrap();
+            let home_dir = home_dir.as_path();
             let workspace_id = blake3::hash(&self.workspace_path.as_bytes());
-            let index_path = format!("~/.fuzzy_ruby_server/{}", workspace_id);
+            let path = Path::new(home_dir)
+                .join(".fuzzy_ruby_server")
+                .join(workspace_id.to_string());
 
-            fs::create_dir_all(&index_path);
+            info!("index_path:");
+            info!("{:#?}", &path);
 
-            let directory = tantivy::directory::MmapDirectory::open(&index_path).unwrap();
+            fs::create_dir_all(&path);
 
-            if let Ok(index) = Index::open_or_create(directory, self.schema.clone()) {
-                self.index = Some(index);
-            }
+            self.index = Some(Index::create_in_ram(self.schema.clone()));
+
+            // let directory = tantivy::directory::MmapDirectory::open(&path).unwrap();
+
+            // if let Ok(index) = Index::open_or_create(directory, self.schema.clone()) {
+                // self.index = Some(index);
+            // }
         }
     }
 
-    pub fn reindex_modified_files(&self) {}
+    pub fn reindex_modified_files(&self) {
+        let walk_dir = WalkDirGeneric::<((usize), (bool))>::new(&self.workspace_path)
+            .process_read_dir(|_depth, _path, _read_dir_state, children| {
+                children.retain(|dir_entry_result| {
+                    dir_entry_result
+                        .as_ref()
+                        .map(|dir_entry| {
+                            if let Some(file_name) = dir_entry.file_name.to_str() {
+                                let ruby_file = file_name.ends_with(".rb");
+                                let metadata = dir_entry.metadata().unwrap();
+                                let mtime = FileTime::from_last_modification_time(&metadata);
+                                // let last_run_time = FileTime::now().seconds() - 5000000000000000000;
+
+                                let last_run_time =
+                                    FileTime::from_unix_time(FileTime::now().unix_seconds(), 0)
+                                        .seconds()
+                                        - 500000000;
+                                let modified = mtime.seconds() > last_run_time;
+
+                                dir_entry.file_type.is_dir() || (ruby_file && modified)
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false)
+                });
+
+                children.iter_mut().for_each(|dir_entry_result| {
+                    if let Ok(dir_entry) = dir_entry_result {
+                        if let Some(file_name) = dir_entry.file_name.to_str() {
+                            if file_name.contains("node_modules")
+                                || file_name.contains("vendor")
+                                || file_name.contains("tmp")
+                                || file_name.contains(".git")
+                            {
+                                dir_entry.read_children_path = None;
+                            }
+                        }
+                    }
+                });
+            });
+
+        if let Some(index) = &self.index {
+            let mut index_writer = index.writer(100_000_000).unwrap();
+            index_writer.delete_all_documents();
+            index_writer.commit();
+
+            for entry in walk_dir {
+                let path = entry.unwrap().path();
+                let path = path.to_str().unwrap();
+
+                if path.ends_with(".rb") {
+                    info!("Indexing path:");
+                    info!("{}", path);
+
+                    let text = fs::read_to_string(&path).unwrap();
+                    let uri = Url::from_file_path(&path).unwrap();
+
+                    self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
+                }
+            }
+
+            index_writer.commit().unwrap();
+        }
+
+    }
+
+    pub fn reindex_modified_file_without_commit(
+        &self,
+        text: &String,
+        uri: &Url,
+        index_writer: &IndexWriter,
+    ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
+        if let Some(index) = &self.index {
+            let mut documents = Vec::new();
+
+            let diagnostics = match parse(text, &mut documents) {
+                Ok(diagnostics) => diagnostics,
+                Err(diagnostics) => {
+                    // Return early so existing documents are not deleted when there is a syntax error
+                    return Ok(diagnostics);
+                }
+            };
+
+            let relative_path = uri.path().replace(&self.workspace_path, "");
+            let file_path_id = blake3::hash(&relative_path.as_bytes());
+
+            let file_path_id_term =
+                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+
+
+            for document in documents {
+                let mut fuzzy_doc = Document::default();
+
+                fuzzy_doc.add_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+
+                for path_part in relative_path.split("/") {
+                    if path_part.len() > 0 {
+                        fuzzy_doc.add_text(self.schema_fields.file_path, path_part);
+                    }
+                }
+
+                for fuzzy_scope in document.fuzzy_ruby_scope {
+                    fuzzy_doc.add_text(self.schema_fields.fuzzy_ruby_scope_field, fuzzy_scope);
+                }
+
+                fuzzy_doc.add_text(
+                    self.schema_fields.category_field,
+                    document.category.to_string(),
+                );
+                fuzzy_doc.add_text(self.schema_fields.name_field, document.name);
+                fuzzy_doc.add_text(self.schema_fields.node_type_field, document.node_type);
+                fuzzy_doc.add_u64(
+                    self.schema_fields.line_field,
+                    document.line.try_into().unwrap(),
+                );
+                fuzzy_doc.add_u64(
+                    self.schema_fields.start_column_field,
+                    document.start_column.try_into().unwrap(),
+                );
+                fuzzy_doc.add_u64(
+                    self.schema_fields.end_column_field,
+                    document.end_column.try_into().unwrap(),
+                );
+
+                let start_col = document.start_column;
+                let end_col = document.end_column;
+                let col_range = start_col..(end_col + 1);
+                for col in col_range {
+                    fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
+                }
+
+                // info!("fuzzy_doc:");
+                // info!("{:#?}", fuzzy_doc);
+
+                index_writer.add_document(fuzzy_doc)?;
+            }
+
+
+            Ok(diagnostics)
+        } else {
+            Ok(vec![])
+        }
+    }
 
     pub fn reindex_modified_file(
         &self,
@@ -305,6 +458,7 @@ impl Persistence {
 
             let file_path_id_term =
                 Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+
             index_writer.delete_term(file_path_id_term);
 
             for document in documents {
@@ -348,8 +502,8 @@ impl Persistence {
                     fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
                 }
 
-                info!("fuzzy_doc:");
-                info!("{:#?}", fuzzy_doc);
+                // info!("fuzzy_doc:");
+                // info!("{:#?}", fuzzy_doc);
 
                 index_writer.add_document(fuzzy_doc)?;
             }

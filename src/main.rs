@@ -91,7 +91,8 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "server initialized!")
             .await;
 
-        // self.persistence.lock().unwrap().reindex_modified_files();
+        let persistence = self.persistence.lock().await;
+        persistence.reindex_modified_files();
     }
 
     async fn shutdown(&self) -> Result<()> {
