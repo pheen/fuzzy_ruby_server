@@ -27,6 +27,7 @@ use log::info;
 // use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 // use walkdir::WalkDir;
 
+use std::borrow::{Borrow, BorrowMut};
 // use std::sync::{Arc, Mutex};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -38,8 +39,26 @@ async fn main() {
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
 
-    // let persistence = Persistence::new().unwrap();
     let persistence = Arc::new(Mutex::new(Persistence::new().unwrap()));
+    let cloned_persistence = Arc::clone(&persistence);
+
+    tokio::spawn(async move {
+        loop {
+            info!("Loop started.");
+
+            let mut loop_persistence = cloned_persistence.lock().await;
+
+            match loop_persistence.reindex_modified_files() {
+                Ok(_) => {
+                    drop(loop_persistence);
+                    tokio::time::sleep(Duration::from_secs(30)).await
+                },
+                Err(_) => {}
+            }
+
+            info!("Loop ended.");
+        };
+    });
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
@@ -55,6 +74,15 @@ struct Backend {
     // persistence: std::rc::Rc<std::cell::RefCell<Persistence>>,
     persistence: Arc<Mutex<Persistence>>,
 }
+
+// use std::thread;
+// use std::time::Duration;
+
+use tokio::runtime::Runtime;
+use tokio::time::*;
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
@@ -87,12 +115,75 @@ impl LanguageServer for Backend {
     }
 
     async fn initialized(&self, _: InitializedParams) {
-        self.client
-            .log_message(MessageType::INFO, "server initialized!")
-            .await;
+        // self.client
+        //     .log_message(MessageType::INFO, "server initialized!")
+        //     .await;
 
-        let persistence = self.persistence.lock().await;
-        persistence.reindex_modified_files();
+        // let persistence = self.persistence.lock().await;
+        // persistence.reindex_modified_files_loop();
+
+        // self.persistence.reindex_modified_files();
+
+        // let self_clone: Arc<&Backend> = Arc::clone(self);
+
+        // tokio::spawn(async move {
+        //     loop {
+        //         info!("Loop started!");
+
+        //         let persistence = self_clone.persistence.lock().await;
+
+        //         persistence.reindex_modified_files();
+
+        //         info!("Loop ended, sleeping...");
+        //         tokio::time::sleep(Duration::from_secs(100000));
+        //     };
+        // });
+
+
+        // let mut rt = Runtime::new().unwrap();
+
+        // rt.block_on(async move {
+        //     println!("hello from the async block");
+        //     async_function("task0").await;
+
+        //     //bonus, you could spawn tasks too
+        //     tokio::spawn(async { async_function("task1").await });
+        //     tokio::spawn(async { async_function("task2").await });
+        // });
+
+        // loop {}
+
+    // let new_self = Arc::new(Mutex::new(&self));
+
+    // tokio::spawn(async {
+    //     loop {
+    //         info!("Loop started!");
+
+    //         let new_new_self = new_self.lock().await;
+    //         let persistence =  new_new_self.persistence.lock().await;
+
+    //         persistence.reindex_modified_files();
+
+    //         info!("Loop ended, sleeping...");
+    //         tokio::time::sleep(Duration::from_secs(10));
+    //     };
+    // });
+
+
+        // thread::spawn(|| {
+
+
+        //     let mut rt = Runtime::new().unwrap();
+        //     rt.block_on(async move {
+        //         println!("hello from the async block");
+        //         async_function("task0").await;
+
+        //         //bonus, you could spawn tasks too
+        //         tokio::spawn(async { async_function("task1").await });
+        //         tokio::spawn(async { async_function("task2").await });
+        //     });
+        //     loop {}
+        // });
     }
 
     async fn shutdown(&self) -> Result<()> {
@@ -104,7 +195,8 @@ impl LanguageServer for Backend {
         let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
 
         let change_diagnostics =
-            persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
+            // persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
+            persistence.diagnostics(&params.text_document.text, &params.text_document.uri);
 
         for diagnostic in change_diagnostics {
             for unwrapped_diagnostic in diagnostic {

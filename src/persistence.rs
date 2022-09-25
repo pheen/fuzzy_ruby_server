@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+
 use log::info;
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
@@ -31,11 +34,16 @@ use std::path::Path;
 use filetime::FileTime;
 use lib_ruby_parser::{nodes::*, Diagnostic, Node, Parser, ParserOptions};
 
+use tokio::runtime::Runtime;
+use tokio::time::*;
+
 pub struct Persistence {
     schema: Schema,
     schema_fields: SchemaFields,
     index: Option<Index>,
     workspace_path: String,
+    last_reindex_time: i64,
+    indexed_file_paths: Vec<String>,
 }
 
 struct SchemaFields {
@@ -255,13 +263,17 @@ impl Persistence {
 
         let schema = schema_builder.build();
         let index = None;
-        let workspace_path = "".to_string();
+        let workspace_path = "unset".to_string();
+        let last_reindex_time = FileTime::from_unix_time(0, 0).seconds();
+        let indexed_file_paths = Vec::new();
 
         Ok(Self {
             schema,
             schema_fields,
             index,
             workspace_path,
+            last_reindex_time,
+            indexed_file_paths,
         })
     }
 
@@ -282,35 +294,31 @@ impl Persistence {
             fs::create_dir_all(&path);
 
             self.index = Some(Index::create_in_ram(self.schema.clone()));
-
-            // let directory = tantivy::directory::MmapDirectory::open(&path).unwrap();
-
-            // if let Ok(index) = Index::open_or_create(directory, self.schema.clone()) {
-                // self.index = Some(index);
-            // }
         }
     }
 
-    pub fn reindex_modified_files(&self) {
+    pub fn reindex_modified_files(&mut self) -> tantivy::Result<()> {
+        if self.workspace_path == "unset" {
+            info!("Refusing to reindex workspace as no workspace was found.");
+            return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
+        }
+
+        let start_time = FileTime::from_unix_time(FileTime::now().unix_seconds(), 0).seconds() - 1;
+        let last_reindex_time = self.last_reindex_time.clone();
+
         let walk_dir = WalkDirGeneric::<((usize), (bool))>::new(&self.workspace_path)
-            .process_read_dir(|_depth, _path, _read_dir_state, children| {
+            .process_read_dir(move |_depth, _path, _read_dir_state, children| {
                 children.retain(|dir_entry_result| {
                     dir_entry_result
                         .as_ref()
                         .map(|dir_entry| {
                             if let Some(file_name) = dir_entry.file_name.to_str() {
                                 let ruby_file = file_name.ends_with(".rb");
-                                let metadata = dir_entry.metadata().unwrap();
-                                let mtime = FileTime::from_last_modification_time(&metadata);
-                                // let last_run_time = FileTime::now().seconds() - 5000000000000000000;
+                                // let metadata = dir_entry.metadata().unwrap();
+                                // let mtime = FileTime::from_last_modification_time(&metadata);
+                                // let recently_modified = mtime.seconds() >= last_reindex_time;
 
-                                let last_run_time =
-                                    FileTime::from_unix_time(FileTime::now().unix_seconds(), 0)
-                                        .seconds()
-                                        - 500000000;
-                                let modified = mtime.seconds() > last_run_time;
-
-                                dir_entry.file_type.is_dir() || (ruby_file && modified)
+                                dir_entry.file_type.is_dir() || ruby_file
                             } else {
                                 false
                             }
@@ -333,29 +341,69 @@ impl Persistence {
                 });
             });
 
+        let mut visible_file_paths = Vec::new();
+        let mut new_indexable_file_paths = Vec::new();
+        let mut deletable_file_paths = Vec::new();
+
+        for entry in walk_dir {
+            let path = entry.unwrap().path();
+            let path = path.to_str().unwrap();
+            let ruby_file = path.ends_with(".rb");
+
+            if ruby_file {
+                &visible_file_paths.push(path.to_string());
+
+                let metadata = fs::metadata(path).unwrap();
+                let mtime = FileTime::from_last_modification_time(&metadata);
+                let recently_modified = mtime.seconds() >= last_reindex_time;
+
+                if recently_modified {
+                    &new_indexable_file_paths.push(path.to_string());
+                }
+            }
+        }
+
+        for path in &self.indexed_file_paths {
+            if !&visible_file_paths.contains(path) {
+                deletable_file_paths.push(path);
+            }
+        }
+
         if let Some(index) = &self.index {
-            let mut index_writer = index.writer(100_000_000).unwrap();
-            index_writer.delete_all_documents();
+            let mut index_writer = index.writer(50_000_000).unwrap();
+
+            for path in deletable_file_paths {
+                let relative_path = path.replace(&self.workspace_path, "");
+
+                info!("Deleting relative path: {:#?}", relative_path);
+
+                let file_path_id = blake3::hash(&relative_path.as_bytes());
+                let path_term =
+                    Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+
+                index_writer.delete_term(path_term);
+            }
+
+            // index_writer.delete_all_documents();
             index_writer.commit();
 
-            for entry in walk_dir {
-                let path = entry.unwrap().path();
-                let path = path.to_str().unwrap();
+            for path in &new_indexable_file_paths {
+                info!("Indexing path:");
+                info!("{}", path);
 
-                if path.ends_with(".rb") {
-                    info!("Indexing path:");
-                    info!("{}", path);
+                let text = fs::read_to_string(&path).unwrap();
+                let uri = Url::from_file_path(&path).unwrap();
 
-                    let text = fs::read_to_string(&path).unwrap();
-                    let uri = Url::from_file_path(&path).unwrap();
-
-                    self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
-                }
+                &self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
             }
 
             index_writer.commit().unwrap();
         }
 
+        self.last_reindex_time = start_time;
+        self.indexed_file_paths = new_indexable_file_paths;
+
+        Ok(())
     }
 
     pub fn reindex_modified_file_without_commit(
@@ -380,7 +428,6 @@ impl Persistence {
 
             let file_path_id_term =
                 Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
-
 
             for document in documents {
                 let mut fuzzy_doc = Document::default();
@@ -428,7 +475,6 @@ impl Persistence {
 
                 index_writer.add_document(fuzzy_doc)?;
             }
-
 
             Ok(diagnostics)
         } else {
@@ -513,6 +559,23 @@ impl Persistence {
             Ok(diagnostics)
         } else {
             Ok(vec![])
+        }
+    }
+
+    pub fn diagnostics(
+        &self,
+        text: &String,
+        uri: &Url,
+    ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
+        let mut documents = Vec::new();
+
+        if let Some(index) = &self.index {
+            match parse(text, &mut documents) {
+                Ok(diagnostics) => Ok(diagnostics),
+                Err(diagnostics) => Ok(diagnostics),
+            }
+        } else {
+            Ok(Vec::new())
         }
     }
 
