@@ -8,31 +8,13 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use log::info;
 
-// use std::fs::DirEntry;
-
-// use lib_ruby_parser::source::DecodedInput;
-// // use lib_ruby_parser::traverse::finder::PatternError;
-// // ---
-// // Importing tantivy...
-// use tantivy::collector::TopDocs;
-// use tantivy::query::QueryParser;
-// use tantivy::schema::{self, *};
-// use tantivy::{doc, Index, ReloadPolicy};
-// // use tempfile::TempDir;
-
-// use std::error::Error;
-// use std::fs::{self, read_to_string};
-
-// use filetime::FileTime;
-// use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
-// use walkdir::WalkDir;
-
 use std::borrow::{Borrow, BorrowMut};
-// use std::sync::{Arc, Mutex};
 use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
 #[tokio::main]
+#[quit::main]
 async fn main() {
     env_logger::init();
 
@@ -47,6 +29,10 @@ async fn main() {
             info!("Loop started.");
 
             let mut loop_persistence = cloned_persistence.lock().await;
+
+            if !loop_persistence.editor_process_running() {
+                quit::with_code(1);
+            }
 
             match loop_persistence.reindex_modified_files() {
                 Ok(_) => {
@@ -88,7 +74,9 @@ use std::rc::Rc;
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let mut persistence = self.persistence.lock().await;
-        persistence.set_workspace_path(params.root_uri);
+
+        &persistence.set_process_id(params.process_id);
+        &persistence.set_workspace_path(params.root_uri);
 
         Ok(InitializeResult {
             server_info: None,
@@ -104,89 +92,24 @@ impl LanguageServer for Backend {
                         })),
                     },
                 )),
-                // text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                //     TextDocumentSyncKind::FULL,
-                // )),
                 definition_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
     }
 
-    async fn initialized(&self, _: InitializedParams) {
-        // self.client
-        //     .log_message(MessageType::INFO, "server initialized!")
-        //     .await;
-
-        // let persistence = self.persistence.lock().await;
-        // persistence.reindex_modified_files_loop();
-
-        // self.persistence.reindex_modified_files();
-
-        // let self_clone: Arc<&Backend> = Arc::clone(self);
-
-        // tokio::spawn(async move {
-        //     loop {
-        //         info!("Loop started!");
-
-        //         let persistence = self_clone.persistence.lock().await;
-
-        //         persistence.reindex_modified_files();
-
-        //         info!("Loop ended, sleeping...");
-        //         tokio::time::sleep(Duration::from_secs(100000));
-        //     };
-        // });
-
-
-        // let mut rt = Runtime::new().unwrap();
-
-        // rt.block_on(async move {
-        //     println!("hello from the async block");
-        //     async_function("task0").await;
-
-        //     //bonus, you could spawn tasks too
-        //     tokio::spawn(async { async_function("task1").await });
-        //     tokio::spawn(async { async_function("task2").await });
-        // });
-
-        // loop {}
-
-    // let new_self = Arc::new(Mutex::new(&self));
-
-    // tokio::spawn(async {
-    //     loop {
-    //         info!("Loop started!");
-
-    //         let new_new_self = new_self.lock().await;
-    //         let persistence =  new_new_self.persistence.lock().await;
-
-    //         persistence.reindex_modified_files();
-
-    //         info!("Loop ended, sleeping...");
-    //         tokio::time::sleep(Duration::from_secs(10));
-    //     };
-    // });
-
-
-        // thread::spawn(|| {
-
-
-        //     let mut rt = Runtime::new().unwrap();
-        //     rt.block_on(async move {
-        //         println!("hello from the async block");
-        //         async_function("task0").await;
-
-        //         //bonus, you could spawn tasks too
-        //         tokio::spawn(async { async_function("task1").await });
-        //         tokio::spawn(async { async_function("task2").await });
-        //     });
-        //     loop {}
-        // });
-    }
+    // async fn initialized(&self, _: InitializedParams) {
+    //     Ok(());
+    // }
 
     async fn shutdown(&self) -> Result<()> {
+        // let persistence = self.persistence.lock().await;
+        // persistence.abort_reindex_task();
+        // info!("Shutting down!!!");
+        // panic!("Exiting Fuzzy Ruby Server...");
+
         Ok(())
     }
 
@@ -299,5 +222,20 @@ impl LanguageServer for Backend {
         }();
 
         Ok(highlights_response)
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let persistence = self.persistence.lock().await;
+        let text_position = params.clone().text_document_position;
+        let text_document = &params.text_document_position.text_document;
+
+        let locations_response = || -> Option<Vec<Location>> {
+            let documents = persistence.find_references(text_position).unwrap();
+            let locations = persistence.documents_to_locations(text_document.uri.path(), documents);
+
+            Some(locations)
+        }();
+
+        Ok(locations_response)
     }
 }

@@ -38,19 +38,16 @@ import {
 } from "vscode-languageclient/node";
 
 let client: LanguageClient;
-// type a = Parameters<>;
 
 export async function activate(context: ExtensionContext) {
+  let base_dir = __dirname.split("/").slice(0, -2).join("/");
 
-  // const traceOutputChannel = window.createOutputChannel("Fuzzy Ruby Language Server trace");
-  // const command = process.env.SERVER_PATH || "fuzzy";
-  const command = "/Users/joelkorpela/dev/fuzzy_ruby_vscode_client/target/debug/fuzzy";
+  const command = `${base_dir}/bin/fuzzy`;
   const run: Executable = {
     command,
     options: {
       env: {
         ...process.env,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
         RUST_LOG: "debug",
         RUST_BACKTRACE: "1",
       },
@@ -79,7 +76,7 @@ export async function activate(context: ExtensionContext) {
   client.start();
 }
 
-export function deactivate(): Thenable<void> | undefined {
+export function deactivate(): Thenable<void> {
   if (!client) {
     return undefined;
   }

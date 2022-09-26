@@ -1,9 +1,11 @@
 use std::collections::HashSet;
-
+use std::sync::Arc;
 
 use log::info;
+use psutil::process;
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
+use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{
     DocumentHighlight, DocumentHighlightKind, Location, MessageType, Position, Range,
     TextDocumentItem, TextDocumentPositionParams, Url,
@@ -12,18 +14,13 @@ use tower_lsp::Client;
 
 use home;
 use jwalk::WalkDirGeneric;
-// use ::phf::{phf_map, Map};
-
-// use std::fs::DirEntry;
 
 use lib_ruby_parser::source::DecodedInput;
-// use lib_ruby_parser::traverse::finder::PatternError;
-// ---
+
 // Importing tantivy...
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
 use tantivy::schema::{self, *};
-// use tempfile::TempDir;
 
 use std::any::Any;
 use std::error::Error;
@@ -44,6 +41,7 @@ pub struct Persistence {
     workspace_path: String,
     last_reindex_time: i64,
     indexed_file_paths: Vec<String>,
+    process_id: Option<u32>,
 }
 
 struct SchemaFields {
@@ -266,6 +264,7 @@ impl Persistence {
         let workspace_path = "unset".to_string();
         let last_reindex_time = FileTime::from_unix_time(0, 0).seconds();
         let indexed_file_paths = Vec::new();
+        let process_id: Option<u32> = None;
 
         Ok(Self {
             schema,
@@ -274,7 +273,28 @@ impl Persistence {
             workspace_path,
             last_reindex_time,
             indexed_file_paths,
+            process_id
         })
+    }
+
+    pub fn set_process_id(&mut self, process_id: Option<u32>) {
+        self.process_id = process_id;
+    }
+
+    pub fn editor_process_running(&self) -> bool {
+        if let Ok(pids) = process::pids() {
+            if let Some(editor_pid) = self.process_id {
+                for pid in pids {
+                    if pid == editor_pid {
+                        return true
+                    }
+                }
+
+                return false
+            }
+        }
+
+        true
     }
 
     pub fn set_workspace_path(&mut self, root_uri: Option<tower_lsp::lsp_types::Url>) {
@@ -801,6 +821,72 @@ impl Persistence {
         &self,
         params: TextDocumentPositionParams,
     ) -> tantivy::Result<Vec<DocumentHighlight>> {
+        if let Ok(search_results) = self.find_references(params) {
+            let mut highlights = Vec::new();
+
+            for search_result in &search_results {
+                // info!("retrieved doc:");
+                // info!("{}", self.schema.to_json(&retrieved_doc));
+
+                let file_path: String = search_result
+                    .get_all(self.schema_fields.file_path)
+                    .flat_map(Value::as_text)
+                    .collect::<Vec<&str>>()
+                    .join("/");
+
+                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
+                let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
+
+                let start_line = search_result
+                    .get_first(self.schema_fields.line_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_column = search_result
+                    .get_first(self.schema_fields.start_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let start_position = Position::new(start_line, start_column);
+                let end_column = search_result
+                    .get_first(self.schema_fields.end_column_field)
+                    .unwrap()
+                    .as_u64()
+                    .unwrap() as u32;
+                let end_position = Position::new(start_line, end_column);
+
+                let range = Range::new(start_position, end_position);
+
+                let category = search_result
+                    .get_first(self.schema_fields.category_field)
+                    .unwrap()
+                    .as_text()
+                    .unwrap();
+
+                let kind = if category == "assignment" {
+                    Some(DocumentHighlightKind::WRITE)
+                } else {
+                    Some(DocumentHighlightKind::READ)
+                };
+
+                let document_highlight = DocumentHighlight { range, kind };
+
+                // info!("location:");
+                // info!("{:#?}", location);
+
+                highlights.push(document_highlight);
+            }
+
+            Ok(highlights)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    pub fn find_references(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> tantivy::Result<Vec<tantivy::Document>> {
         let uri = params.text_document.uri.path();
         let relative_path = params
             .text_document
@@ -850,11 +936,9 @@ impl Persistence {
 
             let usage_top_docs = searcher.search(&query, &TopDocs::with_limit(1))?;
 
-            let mut highlights = Vec::new();
-
             if usage_top_docs.len() == 0 {
                 info!("No highlight usages docs found");
-                return Ok(highlights);
+                return Ok(Vec::new())
             }
 
             let doc_address = usage_top_docs[0].1;
@@ -966,73 +1050,54 @@ impl Persistence {
                 }
             };
 
-            let query = BooleanQuery::new(queries);
-            let top_docs = searcher.search(&query, &TopDocs::with_limit(100))?;
+            let results = searcher.search(
+                &BooleanQuery::new(queries),
+                &TopDocs::with_limit(100)
+            )?;
 
-            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
-            // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
-            // let query = query_parser.parse_query(&query_string)?;
-            // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
+            let mut documents = Vec::new();
 
-            for (_score, doc_address) in top_docs {
-                let retrieved_doc = searcher.doc(doc_address)?;
-
-                // info!("retrieved doc:");
-                // info!("{}", self.schema.to_json(&retrieved_doc));
-
-                let file_path: String = retrieved_doc
-                    .get_all(self.schema_fields.file_path)
-                    .flat_map(Value::as_text)
-                    .collect::<Vec<&str>>()
-                    .join("/");
-
-                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
-                let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
-
-                let start_line = retrieved_doc
-                    .get_first(self.schema_fields.line_field)
-                    .unwrap()
-                    .as_u64()
-                    .unwrap() as u32;
-                let start_column = retrieved_doc
-                    .get_first(self.schema_fields.start_column_field)
-                    .unwrap()
-                    .as_u64()
-                    .unwrap() as u32;
-                let start_position = Position::new(start_line, start_column);
-                let end_column = retrieved_doc
-                    .get_first(self.schema_fields.end_column_field)
-                    .unwrap()
-                    .as_u64()
-                    .unwrap() as u32;
-                let end_position = Position::new(start_line, end_column);
-
-                let range = Range::new(start_position, end_position);
-
-                let category = retrieved_doc
-                    .get_first(self.schema_fields.category_field)
-                    .unwrap()
-                    .as_text()
-                    .unwrap();
-
-                let kind = if category == "assignment" {
-                    Some(DocumentHighlightKind::WRITE)
-                } else {
-                    Some(DocumentHighlightKind::READ)
-                };
-
-                let document_highlight = DocumentHighlight { range, kind };
-
-                // info!("location:");
-                // info!("{:#?}", location);
-
-                highlights.push(document_highlight);
+            for (_score, doc_address) in results {
+                documents.push(searcher.doc(doc_address).unwrap())
             }
 
-            Ok(highlights)
+            Ok(documents)
         } else {
-            Ok(vec![])
+            Ok(Vec::new())
         }
+    }
+
+    pub fn documents_to_locations(&self, path: &str, documents: Vec<tantivy::Document>) -> Vec<Location> {
+        let mut locations = Vec::new();
+
+        for document in documents {
+            let doc_uri = Url::from_file_path(path).unwrap();
+
+            let start_line = document
+                .get_first(self.schema_fields.line_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_column = document
+                .get_first(self.schema_fields.start_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_position = Position::new(start_line, start_column);
+            let end_column = document
+                .get_first(self.schema_fields.end_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let end_position = Position::new(start_line, end_column);
+
+            let doc_range = Range::new(start_position, end_position);
+            let location = Location::new(doc_uri, doc_range);
+
+            locations.push(location);
+        }
+
+        locations
     }
 }
 
