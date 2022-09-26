@@ -1,12 +1,16 @@
 {
-  "name": "fuzzy-ruby-language-server",
-  "description": "nano rust language server",
+  "name": "fuzzy-ruby-server",
+  "displayName": "Fuzzy Ruby Server",
+  "description": "Performant Goto Definition and other LSP features",
   "license": "MIT",
-  "version": "1.5.0",
+  "version": "0.5.0",
   "categories": [],
   "keywords": [
-    "language-server",
-    "tower-lsp"
+    "ruby",
+    "language",
+    "server",
+    "goto",
+    "definition"
   ],
   "engines": {
     "vscode": "^1.65.0"
