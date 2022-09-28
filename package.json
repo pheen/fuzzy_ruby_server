@@ -3,6 +3,10 @@
   "displayName": "Fuzzy Ruby Server",
   "description": "Performant Goto Definition and other LSP features",
   "author": "Joel Korpela",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pheen/fuzzy_ruby_vscode_client"
+  },
   "publisher": "Blinknlights",
   "license": "MIT",
   "version": "0.5.1",
