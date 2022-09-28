@@ -5,7 +5,7 @@
   "author": "Joel Korpela",
   "publisher": "Blinknlights",
   "license": "MIT",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "categories": [],
   "keywords": [
     "ruby",
@@ -20,6 +20,9 @@
   "enabledApiProposals": [],
   "activationEvents": [
     "onLanguage:ruby"
+  ],
+  "extensionKind": [
+    "workspace"
   ],
   "main": "./client/out/extension.js",
   "contributes": {
