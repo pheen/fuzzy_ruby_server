@@ -34,6 +34,10 @@ async fn main() {
                 quit::with_code(1);
             }
 
+            if loop_persistence.no_workspace_confirmed() {
+                quit::with_code(1);
+            }
+
             match loop_persistence.reindex_modified_files() {
                 Ok(_) => {
                     drop(loop_persistence);

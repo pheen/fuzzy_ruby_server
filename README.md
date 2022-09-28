@@ -60,5 +60,13 @@ Enable and configure Rubocop to highlight issues by adding .rubocop.yml to the r
 ![diagnostics](https://user-images.githubusercontent.com/1145873/177204213-777bde3e-5628-4e8c-96d7-e8629050a60e.gif)
 
 &nbsp;
+#### Publishing
+Build a linux binary for Codespaces:
+
+```
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-unknown-linux-gnu-gcc cargo build --release --target=x86_64-unknown-linux-gnu
+```
+
+&nbsp;
 ## License
 [MIT](https://choosealicense.com/licenses/mit/)

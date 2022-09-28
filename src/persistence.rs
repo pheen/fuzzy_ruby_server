@@ -42,6 +42,7 @@ pub struct Persistence {
     last_reindex_time: i64,
     indexed_file_paths: Vec<String>,
     process_id: Option<u32>,
+    no_workspace: bool,
 }
 
 struct SchemaFields {
@@ -265,6 +266,7 @@ impl Persistence {
         let last_reindex_time = FileTime::from_unix_time(0, 0).seconds();
         let indexed_file_paths = Vec::new();
         let process_id: Option<u32> = None;
+        let no_workspace = false;
 
         Ok(Self {
             schema,
@@ -273,7 +275,8 @@ impl Persistence {
             workspace_path,
             last_reindex_time,
             indexed_file_paths,
-            process_id
+            process_id,
+            no_workspace
         })
     }
 
@@ -314,7 +317,13 @@ impl Persistence {
             fs::create_dir_all(&path);
 
             self.index = Some(Index::create_in_ram(self.schema.clone()));
+        } else {
+            self.no_workspace = true;
         }
+    }
+
+    pub fn no_workspace_confirmed(&self) -> bool {
+        self.no_workspace
     }
 
     pub fn reindex_modified_files(&mut self) -> tantivy::Result<()> {
