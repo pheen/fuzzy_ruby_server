@@ -1,3 +1,4 @@
+![icon](https://user-images.githubusercontent.com/1145873/192818122-8bdaee87-c2d9-4073-a53a-ace5f040f902.png)
 # Fuzzy Ruby Server
 
 A Ruby language server designed to stay performant for large codebases. A full-text search backend gives fast, but fuzzy search results that approximate the behaviour of Ruby.
