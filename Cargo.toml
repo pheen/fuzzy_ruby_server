@@ -25,3 +25,9 @@ jwalk = "0.6.0"
 home = "0.5.3"
 quit = "1.1.4"
 psutil = "3.2.2"
+
+[build]
+target = "x86_64-unknown-linux-gnu"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "/usr/local/bin/x86_64-unknown-linux-gnu-gcc"

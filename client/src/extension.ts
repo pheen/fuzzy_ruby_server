@@ -5,6 +5,7 @@
 
 import * as path from "path";
 import {
+  env,
   languages,
   workspace,
   EventEmitter,
@@ -41,8 +42,15 @@ let client: LanguageClient;
 
 export async function activate(context: ExtensionContext) {
   let base_dir = __dirname.split("/").slice(0, -2).join("/");
+  let command = undefined;
 
-  const command = `${base_dir}/bin/fuzzy`;
+  // VS Code will return undefined for remoteName if working with a local workspace
+  if (typeof env.remoteName === "undefined") {
+    command = `${base_dir}/bin/fuzzy`;
+  } else {
+    command = `${base_dir}/bin/fuzzy_x86_64-unknown-linux-gnu`;
+  }
+
   const run: Executable = {
     command,
     options: {

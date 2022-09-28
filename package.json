@@ -9,7 +9,8 @@
   },
   "publisher": "Blinknlights",
   "license": "MIT",
-  "version": "0.5.1",
+  "version": "0.5.2",
+  "icon": "images/icon.png",
   "categories": [],
   "keywords": [
     "ruby",
