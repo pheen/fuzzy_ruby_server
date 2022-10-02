@@ -99,6 +99,7 @@ impl LanguageServer for Backend {
                 definition_provider: Some(OneOf::Left(true)),
                 document_highlight_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -241,5 +242,21 @@ impl LanguageServer for Backend {
         }();
 
         Ok(locations_response)
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let persistence = self.persistence.lock().await;
+        let text_position = params.clone().text_document_position;
+        let text_document = &params.text_document_position.text_document;
+        let new_name = &params.new_name;
+
+        let workspace_edit = || -> Option<WorkspaceEdit> {
+            let references = persistence.find_references(text_position).unwrap();
+            let workspace_edit = persistence.rename_tokens(text_document.uri.path(), references, new_name);
+
+            Some(workspace_edit)
+        }();
+
+        Ok(workspace_edit)
     }
 }

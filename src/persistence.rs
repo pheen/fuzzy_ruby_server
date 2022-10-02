@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::sync::Arc;
 
 use log::info;
@@ -8,7 +8,7 @@ use tantivy::{Index, IndexWriter};
 use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{
     DocumentHighlight, DocumentHighlightKind, Location, MessageType, Position, Range,
-    TextDocumentItem, TextDocumentPositionParams, Url,
+    TextDocumentItem, TextDocumentPositionParams, Url, WorkspaceEdit, TextEdit,
 };
 use tower_lsp::Client;
 
@@ -1028,7 +1028,12 @@ impl Persistence {
                 // todo: improved indexed scopes so there is a separate class scope, etc
                 // "Ivar" => {},
                 // todo: improved to be more accurate
-                "Lvar" => {
+
+                // same values as local assignment type restrictions, for
+                // example "Lvasgn" in ASSIGNMENT_TYPE_RESTRICTIONS
+                "Arg" | "Kwarg" | "Kwoptarg" | "Kwrestarg" |
+                "Lvasgn" | "MatchVar" | "Optarg" | "Restarg" |
+                "Shadowarg" | "Lvar" => {
                     for scope_name in usage_fuzzy_scope {
                         let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
                             Term::from_field_text(
@@ -1107,6 +1112,44 @@ impl Persistence {
         }
 
         locations
+    }
+
+    pub fn rename_tokens(&self, path: &str, documents: Vec<tantivy::Document>, new_name: &String) -> WorkspaceEdit {
+        let mut edits = Vec::new();
+
+        for document in documents {
+            let start_line = document
+                .get_first(self.schema_fields.line_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_column = document
+                .get_first(self.schema_fields.start_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_position = Position::new(start_line, start_column);
+            let end_column = document
+                .get_first(self.schema_fields.end_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let end_position = Position::new(start_line, end_column);
+
+            edits.push(TextEdit::new(
+                Range::new(start_position, end_position),
+                new_name.clone(),
+            ));
+        }
+
+        let mut map = HashMap::new();
+        let uri = Url::from_file_path(&path).unwrap();
+
+        map.insert(uri, edits);
+
+        let workspace_edit = WorkspaceEdit::new(map);
+
+        workspace_edit
     }
 }
 
