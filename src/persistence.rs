@@ -1,75 +1,21 @@
-use std::collections::{HashSet, HashMap};
-use std::sync::Arc;
-
+use filetime::FileTime;
+// use home;
+use jwalk::WalkDirGeneric;
+use lib_ruby_parser::source::DecodedInput;
+use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 use log::info;
+use phf::phf_map;
 use psutil::process;
+use std::collections::HashMap;
+use std::fs;
+use tantivy::collector::TopDocs;
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
-use tokio::task::JoinHandle;
 use tower_lsp::lsp_types::{
-    DocumentHighlight, DocumentHighlightKind, Location, MessageType, Position, Range,
-    TextDocumentItem, TextDocumentPositionParams, Url, WorkspaceEdit, TextEdit,
+    DocumentHighlight, DocumentHighlightKind, Location, Position, Range,
+    TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
-use tower_lsp::Client;
-
-use home;
-use jwalk::WalkDirGeneric;
-
-use lib_ruby_parser::source::DecodedInput;
-
-// Importing tantivy...
-use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, TermQuery};
-use tantivy::schema::{self, *};
-
-use std::any::Any;
-use std::error::Error;
-use std::fs::{self, read_to_string};
-use std::ops::AddAssign;
-use std::path::Path;
-
-use filetime::FileTime;
-use lib_ruby_parser::{nodes::*, Diagnostic, Node, Parser, ParserOptions};
-
-use tokio::runtime::Runtime;
-use tokio::time::*;
-
-pub struct Persistence {
-    schema: Schema,
-    schema_fields: SchemaFields,
-    index: Option<Index>,
-    workspace_path: String,
-    last_reindex_time: i64,
-    indexed_file_paths: Vec<String>,
-    process_id: Option<u32>,
-    no_workspace: bool,
-}
-
-struct SchemaFields {
-    file_path_id: Field,
-    file_path: Field,
-    category_field: Field,
-    fuzzy_ruby_scope_field: Field,
-    name_field: Field,
-    node_type_field: Field,
-    line_field: Field,
-    start_column_field: Field,
-    end_column_field: Field,
-    columns_field: Field,
-}
-
-#[derive(Debug)]
-struct FuzzyNode<'a> {
-    category: &'a str,
-    fuzzy_ruby_scope: Vec<String>,
-    name: String,
-    node_type: &'a str,
-    line: usize,
-    start_column: usize,
-    end_column: usize,
-}
-
-use phf::phf_map;
 
 static USAGE_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
     "Alias" => &[
@@ -189,11 +135,45 @@ static ASSIGNMENT_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! 
     ],
 };
 
+pub struct Persistence {
+    schema: Schema,
+    schema_fields: SchemaFields,
+    index: Option<Index>,
+    workspace_path: String,
+    last_reindex_time: i64,
+    indexed_file_paths: Vec<String>,
+    process_id: Option<u32>,
+    no_workspace: bool,
+}
+
+struct SchemaFields {
+    file_path_id: Field,
+    file_path: Field,
+    category_field: Field,
+    fuzzy_ruby_scope_field: Field,
+    name_field: Field,
+    node_type_field: Field,
+    line_field: Field,
+    start_column_field: Field,
+    end_column_field: Field,
+    columns_field: Field,
+}
+
+#[derive(Debug)]
+struct FuzzyNode<'a> {
+    category: &'a str,
+    fuzzy_ruby_scope: Vec<String>,
+    name: String,
+    node_type: &'a str,
+    line: usize,
+    start_column: usize,
+    end_column: usize,
+}
+
 impl Persistence {
     pub fn new() -> tantivy::Result<Persistence> {
         let mut schema_builder = Schema::builder();
         let schema_fields = SchemaFields {
-            // file_path_id: schema_builder.add_text_field("file_path_id", TEXT | STORED),
             file_path_id: schema_builder.add_text_field(
                 "file_path_id",
                 TextOptions::default()
@@ -276,7 +256,7 @@ impl Persistence {
             last_reindex_time,
             indexed_file_paths,
             process_id,
-            no_workspace
+            no_workspace,
         })
     }
 
@@ -289,11 +269,11 @@ impl Persistence {
             if let Some(editor_pid) = self.process_id {
                 for pid in pids {
                     if pid == editor_pid {
-                        return true
+                        return true;
                     }
                 }
 
-                return false
+                return false;
             }
         }
 
@@ -304,17 +284,17 @@ impl Persistence {
         if let Some(uri) = root_uri {
             self.workspace_path = uri.path().to_string();
 
-            let home_dir = home::home_dir().unwrap();
-            let home_dir = home_dir.as_path();
-            let workspace_id = blake3::hash(&self.workspace_path.as_bytes());
-            let path = Path::new(home_dir)
-                .join(".fuzzy_ruby_server")
-                .join(workspace_id.to_string());
+            // let home_dir = home::home_dir().unwrap();
+            // let home_dir = home_dir.as_path();
+            // let workspace_id = blake3::hash(&self.workspace_path.as_bytes());
+            // let path = Path::new(home_dir)
+            //     .join(".fuzzy_ruby_server")
+            //     .join(workspace_id.to_string());
 
-            info!("index_path:");
-            info!("{:#?}", &path);
+            // info!("index_path:");
+            // info!("{:#?}", &path);
 
-            fs::create_dir_all(&path);
+            // fs::create_dir_all(&path).unwrap();
 
             self.index = Some(Index::create_in_ram(self.schema.clone()));
         } else {
@@ -335,18 +315,14 @@ impl Persistence {
         let start_time = FileTime::from_unix_time(FileTime::now().unix_seconds(), 0).seconds() - 1;
         let last_reindex_time = self.last_reindex_time.clone();
 
-        let walk_dir = WalkDirGeneric::<((usize), (bool))>::new(&self.workspace_path)
-            .process_read_dir(move |_depth, _path, _read_dir_state, children| {
+        let walk_dir = WalkDirGeneric::<(usize, bool)>::new(&self.workspace_path).process_read_dir(
+            move |_depth, _path, _read_dir_state, children| {
                 children.retain(|dir_entry_result| {
                     dir_entry_result
                         .as_ref()
                         .map(|dir_entry| {
                             if let Some(file_name) = dir_entry.file_name.to_str() {
                                 let ruby_file = file_name.ends_with(".rb");
-                                // let metadata = dir_entry.metadata().unwrap();
-                                // let mtime = FileTime::from_last_modification_time(&metadata);
-                                // let recently_modified = mtime.seconds() >= last_reindex_time;
-
                                 dir_entry.file_type.is_dir() || ruby_file
                             } else {
                                 false
@@ -368,7 +344,8 @@ impl Persistence {
                         }
                     }
                 });
-            });
+            },
+        );
 
         let mut visible_file_paths = Vec::new();
         let mut new_indexable_file_paths = Vec::new();
@@ -380,14 +357,14 @@ impl Persistence {
             let ruby_file = path.ends_with(".rb");
 
             if ruby_file {
-                &visible_file_paths.push(path.to_string());
+                visible_file_paths.push(path.to_string());
 
                 let metadata = fs::metadata(path).unwrap();
                 let mtime = FileTime::from_last_modification_time(&metadata);
                 let recently_modified = mtime.seconds() >= last_reindex_time;
 
                 if recently_modified {
-                    &new_indexable_file_paths.push(path.to_string());
+                    new_indexable_file_paths.push(path.to_string());
                 }
             }
         }
@@ -407,8 +384,10 @@ impl Persistence {
                 info!("Deleting relative path: {:#?}", relative_path);
 
                 let file_path_id = blake3::hash(&relative_path.as_bytes());
-                let path_term =
-                    Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
+                let path_term = Term::from_field_text(
+                    self.schema_fields.file_path_id,
+                    &file_path_id.to_string(),
+                );
 
                 index_writer.delete_term(path_term);
             }
@@ -423,7 +402,7 @@ impl Persistence {
                 let text = fs::read_to_string(&path).unwrap();
                 let uri = Url::from_file_path(&path).unwrap();
 
-                &self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
+                self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
             }
 
             index_writer.commit().unwrap();
@@ -441,22 +420,20 @@ impl Persistence {
         uri: &Url,
         index_writer: &IndexWriter,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
-        if let Some(index) = &self.index {
+        if let Some(_) = &self.index {
             let mut documents = Vec::new();
 
             let diagnostics = match parse(text, &mut documents) {
                 Ok(diagnostics) => diagnostics,
                 Err(diagnostics) => {
-                    // Return early so existing documents are not deleted when there is a syntax error
+                    // Return early so existing documents are not deleted when
+                    // there is a syntax error
                     return Ok(diagnostics);
                 }
             };
 
             let relative_path = uri.path().replace(&self.workspace_path, "");
             let file_path_id = blake3::hash(&relative_path.as_bytes());
-
-            let file_path_id_term =
-                Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string());
 
             for document in documents {
                 let mut fuzzy_doc = Document::default();
@@ -499,9 +476,6 @@ impl Persistence {
                     fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
                 }
 
-                // info!("fuzzy_doc:");
-                // info!("{:#?}", fuzzy_doc);
-
                 index_writer.add_document(fuzzy_doc)?;
             }
 
@@ -523,7 +497,8 @@ impl Persistence {
             let diagnostics = match parse(text, &mut documents) {
                 Ok(diagnostics) => diagnostics,
                 Err(diagnostics) => {
-                    // Return early so existing documents are not deleted when there is a syntax error
+                    // Return early so existing documents are not deleted when
+                    // there is a syntax error
                     return Ok(diagnostics);
                 }
             };
@@ -577,9 +552,6 @@ impl Persistence {
                     fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
                 }
 
-                // info!("fuzzy_doc:");
-                // info!("{:#?}", fuzzy_doc);
-
                 index_writer.add_document(fuzzy_doc)?;
             }
 
@@ -594,11 +566,11 @@ impl Persistence {
     pub fn diagnostics(
         &self,
         text: &String,
-        uri: &Url,
+        _uri: &Url,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         let mut documents = Vec::new();
 
-        if let Some(index) = &self.index {
+        if let Some(_) = &self.index {
             match parse(text, &mut documents) {
                 Ok(diagnostics) => Ok(diagnostics),
                 Err(diagnostics) => Ok(diagnostics),
@@ -612,12 +584,8 @@ impl Persistence {
         &self,
         params: TextDocumentPositionParams,
     ) -> tantivy::Result<Vec<Location>> {
-        let uri = params.text_document.uri.path();
-        let relative_path = params
-            .text_document
-            .uri
-            .path()
-            .replace(&self.workspace_path, "");
+        let path = params.text_document.uri.path();
+        let relative_path = path.replace(&self.workspace_path, "");
         info!("{:#?}", relative_path);
 
         let position = params.position;
@@ -629,17 +597,9 @@ impl Persistence {
                 .try_into()?;
 
             let searcher = reader.searcher();
-            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
-
             let character_position = position.character;
             let character_line = position.line;
-            // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
-            // let query = query_parser.parse_query(&query_string)?;
-
             let file_path_id = blake3::hash(&relative_path.as_bytes());
-
-            info!("file_path_id:");
-            info!("{}", &file_path_id);
 
             let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
                 Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
@@ -657,8 +617,6 @@ impl Persistence {
                 Term::from_field_u64(self.schema_fields.columns_field, character_position.into()),
                 IndexRecordOption::Basic,
             ));
-
-            info!("{:#?}", file_path_query);
 
             let query = BooleanQuery::new(vec![
                 (Occur::Must, file_path_query),
@@ -678,9 +636,6 @@ impl Persistence {
 
             let doc_address = usage_top_docs[0].1;
             let retrieved_doc = searcher.doc(doc_address)?;
-
-            info!("retrieved usage doc:");
-            info!("{}", self.schema.to_json(&retrieved_doc));
 
             let category_query: Box<dyn Query> = Box::new(TermQuery::new(
                 Term::from_field_text(self.schema_fields.category_field, "assignment"),
@@ -739,7 +694,8 @@ impl Persistence {
                 // todo: improved indexed scopes so there is a separate class scope, etc
                 // "Ivar" => {},
                 // todo: improved to be more accurate
-                "Lvar" => {
+                "Arg" | "Kwarg" | "Kwoptarg" | "Kwrestarg" | "Lvasgn" | "MatchVar" | "Optarg"
+                | "Restarg" | "Shadowarg" | "Lvar" => {
                     for scope_name in usage_fuzzy_scope {
                         let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
                             Term::from_field_text(
@@ -773,16 +729,8 @@ impl Persistence {
             let query = BooleanQuery::new(queries);
             let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
 
-            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.file_path_id, self.schema_fields.name_field]);
-            // let query_string = format!("category:assignment AND name:\"{usage_name}\"");
-            // let query = query_parser.parse_query(&query_string)?;
-            // let assignments_top_docs = searcher.search(&query, &TopDocs::with_limit(50))?;
-
             for (_score, doc_address) in assignments_top_docs {
                 let retrieved_doc = searcher.doc(doc_address)?;
-
-                info!("retrieved doc:");
-                info!("{}", self.schema.to_json(&retrieved_doc));
 
                 let file_path: String = retrieved_doc
                     .get_all(self.schema_fields.file_path)
@@ -814,9 +762,6 @@ impl Persistence {
                 let doc_range = Range::new(start_position, end_position);
                 let location = Location::new(doc_uri, doc_range);
 
-                info!("location:");
-                info!("{:#?}", location);
-
                 locations.push(location);
             }
 
@@ -834,18 +779,6 @@ impl Persistence {
             let mut highlights = Vec::new();
 
             for search_result in &search_results {
-                // info!("retrieved doc:");
-                // info!("{}", self.schema.to_json(&retrieved_doc));
-
-                let file_path: String = search_result
-                    .get_all(self.schema_fields.file_path)
-                    .flat_map(Value::as_text)
-                    .collect::<Vec<&str>>()
-                    .join("/");
-
-                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
-                let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
-
                 let start_line = search_result
                     .get_first(self.schema_fields.line_field)
                     .unwrap()
@@ -880,9 +813,6 @@ impl Persistence {
 
                 let document_highlight = DocumentHighlight { range, kind };
 
-                // info!("location:");
-                // info!("{:#?}", location);
-
                 highlights.push(document_highlight);
             }
 
@@ -896,12 +826,8 @@ impl Persistence {
         &self,
         params: TextDocumentPositionParams,
     ) -> tantivy::Result<Vec<tantivy::Document>> {
-        let uri = params.text_document.uri.path();
-        let relative_path = params
-            .text_document
-            .uri
-            .path()
-            .replace(&self.workspace_path, "");
+        let path = params.text_document.uri.path();
+        let relative_path = path.replace(&self.workspace_path, "");
 
         let position = params.position;
 
@@ -912,17 +838,9 @@ impl Persistence {
                 .try_into()?;
 
             let searcher = reader.searcher();
-            // let query_parser = QueryParser::for_index(&self.index, vec![self.schema_fields.category_field, self.schema_fields.file_path_id, self.schema_fields.line_field, self.schema_fields.columns_field]);
-
             let character_position = position.character;
             let character_line = position.line;
-            // let query_string = format!("+category:usage AND +file_path_id:\"{relative_path}\" AND +line:{character_line} AND +columns:{character_position}");
-            // let query = query_parser.parse_query(&query_string)?;
-
             let file_path_id = blake3::hash(&relative_path.as_bytes());
-
-            info!("file_path_id:");
-            info!("{}", &file_path_id);
 
             let file_path_query: Box<dyn Query> = Box::new(TermQuery::new(
                 Term::from_field_text(self.schema_fields.file_path_id, &file_path_id.to_string()),
@@ -947,14 +865,11 @@ impl Persistence {
 
             if usage_top_docs.len() == 0 {
                 info!("No highlight usages docs found");
-                return Ok(Vec::new())
+                return Ok(Vec::new());
             }
 
             let doc_address = usage_top_docs[0].1;
             let retrieved_doc = searcher.doc(doc_address)?;
-
-            // info!("retrieved highlight usage doc:");
-            // info!("{}", self.schema.to_json(&retrieved_doc));
 
             let usage_name = retrieved_doc
                 .get_first(self.schema_fields.name_field)
@@ -1031,9 +946,8 @@ impl Persistence {
 
                 // same values as local assignment type restrictions, for
                 // example "Lvasgn" in ASSIGNMENT_TYPE_RESTRICTIONS
-                "Arg" | "Kwarg" | "Kwoptarg" | "Kwrestarg" |
-                "Lvasgn" | "MatchVar" | "Optarg" | "Restarg" |
-                "Shadowarg" | "Lvar" => {
+                "Arg" | "Kwarg" | "Kwoptarg" | "Kwrestarg" | "Lvasgn" | "MatchVar" | "Optarg"
+                | "Restarg" | "Shadowarg" | "Lvar" => {
                     for scope_name in usage_fuzzy_scope {
                         let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
                             Term::from_field_text(
@@ -1064,10 +978,8 @@ impl Persistence {
                 }
             };
 
-            let results = searcher.search(
-                &BooleanQuery::new(queries),
-                &TopDocs::with_limit(100)
-            )?;
+            let results =
+                searcher.search(&BooleanQuery::new(queries), &TopDocs::with_limit(100))?;
 
             let mut documents = Vec::new();
 
@@ -1081,7 +993,11 @@ impl Persistence {
         }
     }
 
-    pub fn documents_to_locations(&self, path: &str, documents: Vec<tantivy::Document>) -> Vec<Location> {
+    pub fn documents_to_locations(
+        &self,
+        path: &str,
+        documents: Vec<tantivy::Document>,
+    ) -> Vec<Location> {
         let mut locations = Vec::new();
 
         for document in documents {
@@ -1114,7 +1030,12 @@ impl Persistence {
         locations
     }
 
-    pub fn rename_tokens(&self, path: &str, documents: Vec<tantivy::Document>, new_name: &String) -> WorkspaceEdit {
+    pub fn rename_tokens(
+        &self,
+        path: &str,
+        documents: Vec<tantivy::Document>,
+        new_name: &String,
+    ) -> WorkspaceEdit {
         let mut edits = Vec::new();
 
         for document in documents {
@@ -1160,7 +1081,6 @@ fn parse(
     Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
     Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
 > {
-    // let contents = fs::read_to_string(entry.path()).expect("Unable to read");
     let options = ParserOptions {
         buffer_name: "(eval)".to_string(),
         record_tokens: false,

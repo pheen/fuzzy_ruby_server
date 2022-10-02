@@ -2,16 +2,17 @@ mod persistence;
 
 use persistence::Persistence;
 
-use tower_lsp::jsonrpc::{Response, Result};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::*;
+use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use log::info;
-
-use std::borrow::{Borrow, BorrowMut};
-use std::sync::Arc;
-
-use tokio::sync::Mutex;
+struct Backend {
+    client: Client,
+    persistence: Arc<Mutex<Persistence>>,
+}
 
 #[tokio::main]
 #[quit::main]
@@ -26,8 +27,6 @@ async fn main() {
 
     tokio::spawn(async move {
         loop {
-            info!("Loop started.");
-
             let mut loop_persistence = cloned_persistence.lock().await;
 
             if !loop_persistence.editor_process_running() {
@@ -42,12 +41,10 @@ async fn main() {
                 Ok(_) => {
                     drop(loop_persistence);
                     tokio::time::sleep(Duration::from_secs(30)).await
-                },
+                }
                 Err(_) => {}
             }
-
-            info!("Loop ended.");
-        };
+        }
     });
 
     let (service, socket) = LspService::new(|client| Backend {
@@ -58,29 +55,13 @@ async fn main() {
     Server::new(stdin, stdout, socket).serve(service).await;
 }
 
-struct Backend {
-    client: Client,
-    // persistence: Persistence,
-    // persistence: std::rc::Rc<std::cell::RefCell<Persistence>>,
-    persistence: Arc<Mutex<Persistence>>,
-}
-
-// use std::thread;
-// use std::time::Duration;
-
-use tokio::runtime::Runtime;
-use tokio::time::*;
-
-use std::cell::RefCell;
-use std::rc::Rc;
-
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let mut persistence = self.persistence.lock().await;
 
-        &persistence.set_process_id(params.process_id);
-        &persistence.set_workspace_path(params.root_uri);
+        persistence.set_process_id(params.process_id);
+        persistence.set_workspace_path(params.root_uri);
 
         Ok(InitializeResult {
             server_info: None,
@@ -105,16 +86,7 @@ impl LanguageServer for Backend {
         })
     }
 
-    // async fn initialized(&self, _: InitializedParams) {
-    //     Ok(());
-    // }
-
     async fn shutdown(&self) -> Result<()> {
-        // let persistence = self.persistence.lock().await;
-        // persistence.abort_reindex_task();
-        // info!("Shutting down!!!");
-        // panic!("Exiting Fuzzy Ruby Server...");
-
         Ok(())
     }
 
@@ -123,13 +95,12 @@ impl LanguageServer for Backend {
         let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
 
         let change_diagnostics =
-            // persistence.reindex_modified_file(&params.text_document.text, &params.text_document.uri);
             persistence.diagnostics(&params.text_document.text, &params.text_document.uri);
 
         for diagnostic in change_diagnostics {
             for unwrapped_diagnostic in diagnostic {
                 if let Some(finally_diagnostic) = unwrapped_diagnostic {
-                    &diagnostics.push(finally_diagnostic.to_owned());
+                    diagnostics.push(finally_diagnostic.to_owned());
                 }
             }
         }
@@ -154,7 +125,7 @@ impl LanguageServer for Backend {
             for diagnostic in change_diagnostics {
                 for unwrapped_diagnostic in diagnostic {
                     if let Some(finally_diagnostic) = unwrapped_diagnostic {
-                        &diagnostics.push(finally_diagnostic.to_owned());
+                        diagnostics.push(finally_diagnostic.to_owned());
                     }
                 }
             }
@@ -178,17 +149,13 @@ impl LanguageServer for Backend {
         for diagnostic in change_diagnostics {
             for unwrapped_diagnostic in diagnostic {
                 if let Some(finally_diagnostic) = unwrapped_diagnostic {
-                    &diagnostics.push(finally_diagnostic.to_owned());
+                    diagnostics.push(finally_diagnostic.to_owned());
                 }
             }
         }
 
         self.client
-            .publish_diagnostics(
-                params.text_document.uri,
-                diagnostics,
-                None,
-            )
+            .publish_diagnostics(params.text_document.uri, diagnostics, None)
             .await;
     }
 
@@ -252,7 +219,8 @@ impl LanguageServer for Backend {
 
         let workspace_edit = || -> Option<WorkspaceEdit> {
             let references = persistence.find_references(text_position).unwrap();
-            let workspace_edit = persistence.rename_tokens(text_document.uri.path(), references, new_name);
+            let workspace_edit =
+                persistence.rename_tokens(text_document.uri.path(), references, new_name);
 
             Some(workspace_edit)
         }();
