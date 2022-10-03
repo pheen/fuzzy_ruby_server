@@ -9,12 +9,12 @@ use psutil::process;
 use std::collections::HashMap;
 use std::fs;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
 use tower_lsp::lsp_types::{
-    DocumentHighlight, DocumentHighlightKind, Location, Position, Range,
-    TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
+    DocumentHighlight, DocumentHighlightKind, Location, Position, Range, SymbolInformation,
+    SymbolKind, TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
 
 static USAGE_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
@@ -993,6 +993,57 @@ impl Persistence {
         }
     }
 
+    pub fn find_references_in_workspace(
+        &self,
+        query: String,
+    ) -> tantivy::Result<Vec<tantivy::Document>> {
+        if let Some(index) = &self.index {
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommit)
+                .try_into()?;
+
+            let searcher = reader.searcher();
+
+            let name_query: Box<dyn Query> = Box::new(RegexQuery::from_pattern(
+                format!("{}.*", query).as_str(),
+                self.schema_fields.name_field,
+            )?);
+
+            let mut allowed_type_queries = vec![];
+            let allowed_types = ["Alias", "Casgn", "Class", "Def", "Defs", "Gvasgn", "Module"];
+
+            for allowed_type in allowed_types {
+                let assignment_type_query: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(self.schema_fields.node_type_field, allowed_type),
+                    IndexRecordOption::Basic,
+                ));
+
+                allowed_type_queries.push((Occur::Should, assignment_type_query));
+            }
+
+            let allowed_types_query = BooleanQuery::new(allowed_type_queries);
+
+            let queries = vec![
+                (Occur::Must, name_query),
+                (Occur::Must, Box::new(allowed_types_query)),
+            ];
+
+            let results =
+                searcher.search(&BooleanQuery::new(queries), &TopDocs::with_limit(100))?;
+
+            let mut documents = Vec::new();
+
+            for (_score, doc_address) in results {
+                documents.push(searcher.doc(doc_address).unwrap())
+            }
+
+            Ok(documents)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
     pub fn documents_to_locations(
         &self,
         path: &str,
@@ -1071,6 +1122,80 @@ impl Persistence {
         let workspace_edit = WorkspaceEdit::new(map);
 
         workspace_edit
+    }
+
+    pub fn documents_to_symbol_information(
+        &self,
+        documents: Vec<tantivy::Document>,
+    ) -> Vec<SymbolInformation> {
+        let mut symbol_infos = Vec::new();
+
+        for document in documents {
+            let doc_path: Vec<&str> = document
+                .get_all(self.schema_fields.file_path)
+                .map(|v| v.as_text().unwrap())
+                .collect();
+            let doc_path = doc_path.join("/");
+            let absolute_file_path = format!("{}/{}", &self.workspace_path, &doc_path);
+            let doc_uri = Url::from_file_path(absolute_file_path).unwrap();
+
+            let name = document
+                .get_first(self.schema_fields.name_field)
+                .unwrap()
+                .as_text()
+                .unwrap();
+
+            let start_line = document
+                .get_first(self.schema_fields.line_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_column = document
+                .get_first(self.schema_fields.start_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let start_position = Position::new(start_line, start_column);
+            let end_column = document
+                .get_first(self.schema_fields.end_column_field)
+                .unwrap()
+                .as_u64()
+                .unwrap() as u32;
+            let end_position = Position::new(start_line, end_column);
+
+            let doc_type = document
+                .get_first(self.schema_fields.node_type_field)
+                .unwrap()
+                .as_text()
+                .unwrap();
+
+            let symbol_kind = match doc_type {
+                "Alias" => SymbolKind::METHOD,
+                "Casgn" => SymbolKind::CLASS,
+                "Class" => SymbolKind::CLASS,
+                "Def" => SymbolKind::METHOD,
+                "Defs" => SymbolKind::METHOD,
+                "Gvasgn" => SymbolKind::VARIABLE,
+                "Module" => SymbolKind::MODULE,
+                _ => SymbolKind::VARIABLE,
+            };
+
+            let doc_range = Range::new(start_position, end_position);
+            let symbol_location = Location::new(doc_uri, doc_range);
+
+            let symbol_info = SymbolInformation {
+                name: name.to_string(),
+                kind: symbol_kind,
+                tags: None,
+                deprecated: None,
+                location: symbol_location,
+                container_name: None,
+            };
+
+            symbol_infos.push(symbol_info);
+        }
+
+        symbol_infos
     }
 }
 
@@ -1224,8 +1349,6 @@ fn serialize(
 
         // Node::BackRef(BackRef { .. }) => {}
         Node::Begin(Begin { statements, .. }) => {
-            // println!("{:#?}", node);
-
             for child_node in statements {
                 serialize(child_node, documents, fuzzy_scope, input);
             }

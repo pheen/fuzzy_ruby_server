@@ -2,6 +2,7 @@ mod persistence;
 
 use persistence::Persistence;
 
+use log::info;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::*;
@@ -81,6 +82,7 @@ impl LanguageServer for Backend {
                 document_highlight_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -226,5 +228,28 @@ impl LanguageServer for Backend {
         }();
 
         Ok(workspace_edit)
+    }
+
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<Vec<SymbolInformation>>> {
+        info!("symbol search started");
+
+        let persistence = self.persistence.lock().await;
+
+        let symbol_info_response = || -> Option<Vec<SymbolInformation>> {
+            let documents = persistence
+                .find_references_in_workspace(params.query)
+                .unwrap_or_else(|_| Vec::new());
+            let symbol_info = persistence.documents_to_symbol_information(documents);
+
+            Some(symbol_info)
+        }();
+
+        info!("symbol_info_response:");
+        info!("{:#?}", symbol_info_response);
+
+        Ok(symbol_info_response)
     }
 }
