@@ -234,8 +234,6 @@ impl LanguageServer for Backend {
         &self,
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
-        info!("symbol search started");
-
         let persistence = self.persistence.lock().await;
 
         let symbol_info_response = || -> Option<Vec<SymbolInformation>> {
@@ -246,9 +244,6 @@ impl LanguageServer for Backend {
 
             Some(symbol_info)
         }();
-
-        info!("symbol_info_response:");
-        info!("{:#?}", symbol_info_response);
 
         Ok(symbol_info_response)
     }

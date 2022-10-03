@@ -2331,6 +2331,120 @@ fn serialize(
             for node in args {
                 serialize(node, documents, fuzzy_scope, input);
             }
+
+            match method_name.as_str() {
+                // Ruby
+                "attr_accessor" |
+                "attr_reader" |
+                "attr_writer" => {
+                    for node in args {
+                        match node {
+                            Node::Sym(Sym { name, expression_l, .. }) => {
+                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                                documents.push(FuzzyNode {
+                                    category: "assignment",
+                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                    name: name.to_string_lossy(),
+                                    node_type: "Def",
+                                    line: lineno,
+                                    start_column: begin_pos,
+                                    end_column: end_pos,
+                                });
+                            },
+                            _ => {}
+                        }
+                    }
+                },
+                "alias_method" => {
+                    if let Some(node) = args.first() {
+                        match node {
+                            Node::Sym(Sym { name, expression_l, .. }) => {
+                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                                documents.push(FuzzyNode {
+                                    category: "assignment",
+                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                    name: name.to_string_lossy(),
+                                    node_type: "Def",
+                                    line: lineno,
+                                    start_column: begin_pos,
+                                    end_column: end_pos,
+                                });
+                            },
+                            Node::Str(Str { value, expression_l, .. }) => {
+                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                                documents.push(FuzzyNode {
+                                    category: "assignment",
+                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                    name: value.to_string_lossy(),
+                                    node_type: "Def",
+                                    line: lineno,
+                                    start_column: begin_pos,
+                                    end_column: end_pos,
+                                });
+                            },
+                            _ => {}
+                        }
+                    }
+                },
+                // Rails
+                "belongs_to" |
+                "has_one" |
+                "has_many" |
+                "has_and_belongs_to_many" => {
+                    if let Some(node) = args.first() {
+                        match node {
+                            Node::Sym(Sym { name, expression_l, .. }) => {
+                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                                documents.push(FuzzyNode {
+                                    category: "assignment",
+                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                    name: name.to_string_lossy(),
+                                    node_type: "Def",
+                                    line: lineno,
+                                    start_column: begin_pos,
+                                    end_column: end_pos,
+                                });
+                            },
+                            _ => {}
+                        }
+                    }
+                },
+                _ => {}
+                // todo: the code below works, but it will pollute searches too
+                // much unless filtering is added when searching
+
+                // Rspec
+                // "let!" | "let" => {
+                //     if let Some(arg) = args.first() {
+                //         match node {
+                //             Node::Sym(Sym { name, expression_l, .. }) => {
+                //                 let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                //                 let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                //                 documents.push(FuzzyNode {
+                //                     category: "assignment",
+                //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                //                     name: name.to_string_lossy(),
+                //                     node_type: "Def",
+                //                     line: lineno,
+                //                     start_column: begin_pos,
+                //                     end_column: end_pos,
+                //                 });
+                //             },
+                //             _ => {}
+                //         }
+                //     }
+                // },
+                // _ => {}
+            }
         }
 
         Node::Shadowarg(Shadowarg { name, expression_l }) => {
@@ -2378,7 +2492,21 @@ fn serialize(
             }
         }
 
-        // Node::Sym(Sym { .. }) => {}
+        Node::Sym(Sym { name, expression_l, .. }) => {
+            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+            documents.push(FuzzyNode {
+                category: "usage",
+                fuzzy_ruby_scope: fuzzy_scope.clone(),
+                name: name.to_string_lossy(),
+                node_type: "Send",
+                line: lineno,
+                start_column: begin_pos,
+                end_column: end_pos,
+            });
+        }
+
         // Node::True(True { .. }) => {}
         Node::Undef(Undef { names, .. }) => {
             for node in names {
