@@ -8,11 +8,11 @@ A Ruby language server designed to stay performant for large codebases. A full-t
 | Features  |  |
 | ------------- | ------------- |
 | [Definitions](#definitions) | Jump to the definitions for methods, variables, etc. |
+| [Definition Search](#definition-search) | Search method, class, and module definitions in a project |
 | [Diagnostics](#diagnostics) | Indicates issues with the code |
 | [References](#references) | Jump to an occurrence of a method, variable, etc. |
 | [Highlights](#highlights) | Highlight all occurrences within a file |
 | [Rename](#rename) | Rename all occurrences within a file |
-| ~[Definition Search](#definition-search)~  | todo: Search definitions in all files. |
 | ~[Formatting](#formatting)~ | todo: Supports formatting only modified lines |
 
 &nbsp;
@@ -27,7 +27,7 @@ The workspace will be indexed automatically.
 ## Features
 <a id="definitions"></a>
 ### Definitions
-Peek or go to the definition of a method/variable/symbol
+Peek or go to the definition of a variable, method, class, or module. If multiple definitions are found they will all be returned. Results are sorted by score so the first result automatically shown will be the closest match.
 
 - **Tip:** Enable the VSCode setting `Workbench > Editor: Reveal If Open`
 - Command: `Go to Definition`
@@ -36,6 +36,16 @@ Peek or go to the definition of a method/variable/symbol
   - `cmd + click`
 
 ![go_to_def](https://user-images.githubusercontent.com/1145873/177204185-281c7d77-6894-41e8-92c0-69110169bed5.gif)
+
+&nbsp;
+<a id="definition-search"></a>
+### Definition Search
+Search method, class, and module definitions in a project.
+
+- Command: `Go to Symbol in Workspace...`
+- Keybind: `cmd + t`
+
+![workspace-symbols](https://code.visualstudio.com/assets/api/language-extensions/language-support/workspace-symbols.gif)
 
 &nbsp;
 <a id="diagnostics"></a>
