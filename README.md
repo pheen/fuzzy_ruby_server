@@ -83,7 +83,7 @@ Rename all occurrences within a file
 ![rename](https://user-images.githubusercontent.com/1145873/177204249-73415e9d-c473-4a3c-9347-694ad3647d50.gif)
 
 &nbsp;
-#### Contributing
+## Contributing
 - Update the `command` path in `extension.ts` to point to your local working directory. Target release as it's necessary or indexing is too slow.
   - E.g., `command = "/Users/<user>/dev/fuzzy_ruby_vscode_client/target/release/fuzzy";`.
 - Run `yarn run esbuild` to compile `extension.ts`.
@@ -92,12 +92,21 @@ Rename all occurrences within a file
 - Make a pull request with your changes. Thank you!
 
 &nbsp;
-#### Publishing
-Build a linux binary for Codespaces:
+## Publishing
+- Build a release binary:
+```
+cargo build --release
+```
 
+- Build a linux binary for Codespaces:
 ```
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-unknown-linux-gnu-gcc cargo build --release --target=x86_64-unknown-linux-gnu
 ```
+- Delete the `target` directory or the `.vsix` package will be huge
+
+- `vsce package`
+
+- Upload the new package
 
 &nbsp;
 ## License
