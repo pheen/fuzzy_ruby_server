@@ -46,7 +46,8 @@ Search method, class, and module definitions in a project.
 - Cmd: `Go to Symbol in Workspace...`
 - Keybind: `cmd + t`
 
-![workspace-symbols](https://code.visualstudio.com/assets/api/language-extensions/language-support/workspace-symbols.gif)
+![workspace-symbols](https://user-images.githubusercontent.com/1145873/224568569-abeafb04-6efb-447c-8d36-f348400c72cb.gif)
+
 
 &nbsp;
 <a id="diagnostics"></a>
