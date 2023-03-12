@@ -51,12 +51,14 @@ export async function activate(context: ExtensionContext) {
     command = `${base_dir}/bin/fuzzy_x86_64-unknown-linux-gnu`;
   }
 
+  command = "/Users/joelkorpela/dev/fuzzy_ruby_vscode_client/target/release/fuzzy";
+
   const run: Executable = {
     command,
     options: {
       env: {
         ...process.env,
-        RUST_LOG: "debug",
+        RUST_LOG: "info",
         RUST_BACKTRACE: "1",
       },
     },

@@ -16,15 +16,18 @@ lib-ruby-parser = "4.0.3"
 tantivy = { git = "https://github.com/quickwit-oss/tantivy" }
 tokio = { version = "1.20.1", features = ["full"] }
 # tower-lsp = { path = "../tower-lsp" }
-walkdir = "2.3.2"
+# walkdir = "2.3.2"
 log = "0.4.17"
-uuid = "1.1.2"
+# uuid = "1.1.2"
 blake3 = "1.3.1"
 phf = { version = "0.11.1", features = ["macros"] }
 jwalk = "0.6.0"
-home = "0.5.3"
+# home = "0.5.3"
 quit = "1.1.4"
 psutil = "3.2.2"
+regex = "1.7.1"
+# which = "4.4.0"
+# shells = "0.2.0"
 
 [build]
 target = "x86_64-unknown-linux-gnu"

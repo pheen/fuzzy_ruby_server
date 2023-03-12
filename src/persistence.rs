@@ -1,4 +1,8 @@
+use std::thread;
+use std::str;
+use std::process::Command;
 use filetime::FileTime;
+use regex::Regex;
 // use home;
 use jwalk::WalkDirGeneric;
 use lib_ruby_parser::source::DecodedInput;
@@ -144,6 +148,7 @@ pub struct Persistence {
     indexed_file_paths: Vec<String>,
     process_id: Option<u32>,
     no_workspace: bool,
+    gems_indexed: bool,
 }
 
 struct SchemaFields {
@@ -157,6 +162,7 @@ struct SchemaFields {
     start_column_field: Field,
     end_column_field: Field,
     columns_field: Field,
+    user_space_field: Field,
 }
 
 #[derive(Debug)]
@@ -238,6 +244,7 @@ impl Persistence {
             start_column_field: schema_builder.add_u64_field("start_column", INDEXED | STORED),
             end_column_field: schema_builder.add_u64_field("end_column", INDEXED | STORED),
             columns_field: schema_builder.add_u64_field("columns", INDEXED | STORED),
+            user_space_field: schema_builder.add_bool_field("user_space", INDEXED | STORED),
         };
 
         let schema = schema_builder.build();
@@ -247,6 +254,7 @@ impl Persistence {
         let indexed_file_paths = Vec::new();
         let process_id: Option<u32> = None;
         let no_workspace = false;
+        let gems_indexed = false;
 
         Ok(Self {
             schema,
@@ -257,6 +265,7 @@ impl Persistence {
             indexed_file_paths,
             process_id,
             no_workspace,
+            gems_indexed,
         })
     }
 
@@ -335,7 +344,6 @@ impl Persistence {
                     if let Ok(dir_entry) = dir_entry_result {
                         if let Some(file_name) = dir_entry.file_name.to_str() {
                             if file_name.contains("node_modules")
-                                || file_name.contains("vendor")
                                 || file_name.contains("tmp")
                                 || file_name.contains(".git")
                             {
@@ -396,17 +404,20 @@ impl Persistence {
             index_writer.commit();
 
             for path in &new_indexable_file_paths {
-                info!("Indexing path:");
-                info!("{}", path);
+                // info!("Indexing path:");
+                // info!("{}", path);
 
                 let text = fs::read_to_string(&path).unwrap();
                 let uri = Url::from_file_path(&path).unwrap();
+                let relative_path = uri.path().replace(&self.workspace_path, "");
 
-                self.reindex_modified_file_without_commit(&text, &uri, &index_writer);
+                self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, true);
             }
 
             index_writer.commit().unwrap();
         }
+
+        info!("Indexing workspace complete!");
 
         self.last_reindex_time = start_time;
         self.indexed_file_paths = new_indexable_file_paths;
@@ -414,11 +425,143 @@ impl Persistence {
         Ok(())
     }
 
+    pub fn reindex_modified_gems(&mut self) -> tantivy::Result<()> {
+        if self.workspace_path == "unset" {
+            info!("Refusing to reindex workspace as no workspace was found.");
+            return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
+        }
+
+        if self.gems_indexed {
+            return Ok(());
+        }
+
+        // Four leading spaces dictates that it's a gem version
+        // https://github.com/rubygems/bundler/blob/v2.1.4/lib/bundler/lockfile_parser.rb#L174-L181
+        let gem_version = Regex::new(r"^\s{4}([a-zA-Z\d\.-_]+)\s\(([\d\w\.-_]+)\)").unwrap();
+        let gemfile_path = format!("{}/{}", &self.workspace_path, "Gemfile.lock");
+
+        if let Ok(gemfile_contents) = fs::read_to_string(gemfile_path) {
+            let mut gem_paths = vec![];
+            let mut base_gem_path = "unset";
+
+            let gem_home_path_result = Command::new("sh")
+                .arg("-c")
+                .arg(format!("eval \"$(/usr/local/bin/rbenv init -)\" && cd {} && gem environment home", &self.workspace_path))
+                .output();
+
+            if let Ok(gem_home_path) = gem_home_path_result {
+                if let Ok(gem_home_path) = str::from_utf8(gem_home_path.stdout.as_slice()) {
+                    base_gem_path = gem_home_path;
+                }
+
+                // Index Ruby
+                let ruby_source_path = base_gem_path.replace("gems/", "").replace("\n", "");
+
+                info!("Added Ruby source path: {}", ruby_source_path);
+                gem_paths.push(ruby_source_path);
+
+                // Index Gems
+                for line in gemfile_contents.lines() {
+                    if let Some(captures) = gem_version.captures(line) {
+                        let name = captures[1].to_string();
+                        let version = captures[2].to_string();
+
+                        info!("gem name: {}", name);
+                        info!("gem version: {}", version);
+
+                        let gem_folder_name = format!("{}/gems/{}-{}", base_gem_path, name, version);
+                        // Not 100% sure where this newline is coming from. `gemfile_contents.lines()` I think.
+                        let gem_folder_name = gem_folder_name.replace("\n", "");
+
+                        info!("gem folder name: {}", gem_folder_name);
+
+                        gem_paths.push(gem_folder_name)
+                    }
+                }
+            }
+
+            for gem_path in gem_paths {
+                // thread::spawn(|| {
+
+                    info!("Starting indexing gem path: {:#?}", gem_path);
+
+                    let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone()).process_read_dir(
+                        move |_depth, _path, _read_dir_state, children| {
+                            children.retain(|dir_entry_result| {
+                                dir_entry_result
+                                    .as_ref()
+                                    .map(|dir_entry| {
+                                        if let Some(file_name) = dir_entry.file_name.to_str() {
+                                            let ruby_file = file_name.ends_with(".rb");
+                                            dir_entry.file_type.is_dir() || ruby_file
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                    .unwrap_or(false)
+                            });
+
+                            children.iter_mut().for_each(|dir_entry_result| {
+                                if let Ok(dir_entry) = dir_entry_result {
+                                    if let Some(file_name) = dir_entry.file_name.to_str() {
+                                        if file_name.contains("node_modules")
+                                            || file_name.contains("vendor")
+                                            || file_name.contains("tmp")
+                                            || file_name.contains(".git")
+                                        {
+                                            dir_entry.read_children_path = None;
+                                        }
+                                    }
+                                }
+                            });
+                        },
+                    );
+
+                    let mut indexable_file_paths = Vec::new();
+
+                    for entry in walk_dir {
+                        let path = entry.unwrap().path();
+                        let path = path.to_str().unwrap();
+                        let ruby_file = path.ends_with(".rb");
+
+                        if ruby_file {
+                            indexable_file_paths.push(path.to_string());
+                        }
+                    }
+
+                    if let Some(index) = &self.index {
+                        let mut index_writer = index.writer(50_000_000).unwrap();
+
+                        for path in &indexable_file_paths {
+                            let text = fs::read_to_string(&path).unwrap();
+                            let uri = Url::from_file_path(&path).unwrap();
+                            let relative_path = uri.path().replace(&self.workspace_path, "");
+
+                            self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
+                        }
+
+                        index_writer.commit().unwrap();
+                    }
+                // });
+
+                info!("Finished indexing gem path: {:#?}", gem_path);
+            }
+        } else {
+            info!("Gemfile not found, skipping indexing workspace gems.");
+            // return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
+        }
+
+        self.gems_indexed = true;
+
+        Ok(())
+    }
+
     pub fn reindex_modified_file_without_commit(
         &self,
         text: &String,
-        uri: &Url,
+        relative_path: String,
         index_writer: &IndexWriter,
+        user_space: bool,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         if let Some(_) = &self.index {
             let mut documents = Vec::new();
@@ -432,7 +575,6 @@ impl Persistence {
                 }
             };
 
-            let relative_path = uri.path().replace(&self.workspace_path, "");
             let file_path_id = blake3::hash(&relative_path.as_bytes());
 
             for document in documents {
@@ -468,6 +610,7 @@ impl Persistence {
                     self.schema_fields.end_column_field,
                     document.end_column.try_into().unwrap(),
                 );
+                fuzzy_doc.add_bool(self.schema_fields.user_space_field, user_space);
 
                 let start_col = document.start_column;
                 let end_col = document.end_column;
@@ -503,7 +646,17 @@ impl Persistence {
                 }
             };
 
-            let relative_path = uri.path().replace(&self.workspace_path, "");
+            let user_space: bool;
+            let relative_path: String;
+
+            if uri.path().contains(&self.workspace_path) {
+                user_space = true;
+                relative_path = uri.path().replace(&self.workspace_path, "");
+            } else {
+                user_space = false;
+                relative_path = uri.path().to_string();
+            }
+
             let file_path_id = blake3::hash(&relative_path.as_bytes());
 
             let file_path_id_term =
@@ -544,6 +697,7 @@ impl Persistence {
                     self.schema_fields.end_column_field,
                     document.end_column.try_into().unwrap(),
                 );
+                fuzzy_doc.add_bool(self.schema_fields.user_space_field, user_space);
 
                 let start_col = document.start_column;
                 let end_col = document.end_column;
@@ -738,7 +892,20 @@ impl Persistence {
                     .collect::<Vec<&str>>()
                     .join("/");
 
-                let absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
+                let absolute_file_path: String;
+
+                let user_space = retrieved_doc
+                    .get_first(self.schema_fields.user_space_field)
+                    .unwrap()
+                    .as_bool()
+                    .unwrap() as bool;
+
+                if user_space {
+                    absolute_file_path = format!("{}/{}", &self.workspace_path, &file_path);
+                } else {
+                    absolute_file_path = format!("/{}", &file_path);
+                }
+
                 let doc_uri = Url::from_file_path(&absolute_file_path).unwrap();
 
                 let start_line = retrieved_doc
@@ -1005,6 +1172,11 @@ impl Persistence {
 
             let searcher = reader.searcher();
 
+            let user_space_query: Box<dyn Query> = Box::new(TermQuery::new(
+                Term::from_field_bool(self.schema_fields.user_space_field, true),
+                IndexRecordOption::Basic,
+            ));
+
             let name_query: Box<dyn Query> = Box::new(RegexQuery::from_pattern(
                 format!("{}.*", query).as_str(),
                 self.schema_fields.name_field,
@@ -1025,6 +1197,7 @@ impl Persistence {
             let allowed_types_query = BooleanQuery::new(allowed_type_queries);
 
             let queries = vec![
+                (Occur::Must, user_space_query),
                 (Occur::Must, name_query),
                 (Occur::Must, Box::new(allowed_types_query)),
             ];
@@ -2334,14 +2507,16 @@ fn serialize(
 
             match method_name.as_str() {
                 // Ruby
-                "attr_accessor" |
-                "attr_reader" |
-                "attr_writer" => {
+                "attr_accessor" | "attr_reader" | "attr_writer" => {
                     for node in args {
                         match node {
-                            Node::Sym(Sym { name, expression_l, .. }) => {
-                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+                            Node::Sym(Sym {
+                                name, expression_l, ..
+                            }) => {
+                                let (lineno, begin_pos) =
+                                    input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) =
+                                    input.line_col_for_pos(expression_l.end).unwrap();
 
                                 documents.push(FuzzyNode {
                                     category: "assignment",
@@ -2352,17 +2527,21 @@ fn serialize(
                                     start_column: begin_pos,
                                     end_column: end_pos,
                                 });
-                            },
+                            }
                             _ => {}
                         }
                     }
-                },
+                }
                 "alias_method" => {
                     if let Some(node) = args.first() {
                         match node {
-                            Node::Sym(Sym { name, expression_l, .. }) => {
-                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+                            Node::Sym(Sym {
+                                name, expression_l, ..
+                            }) => {
+                                let (lineno, begin_pos) =
+                                    input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) =
+                                    input.line_col_for_pos(expression_l.end).unwrap();
 
                                 documents.push(FuzzyNode {
                                     category: "assignment",
@@ -2373,10 +2552,16 @@ fn serialize(
                                     start_column: begin_pos,
                                     end_column: end_pos,
                                 });
-                            },
-                            Node::Str(Str { value, expression_l, .. }) => {
-                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+                            }
+                            Node::Str(Str {
+                                value,
+                                expression_l,
+                                ..
+                            }) => {
+                                let (lineno, begin_pos) =
+                                    input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) =
+                                    input.line_col_for_pos(expression_l.end).unwrap();
 
                                 documents.push(FuzzyNode {
                                     category: "assignment",
@@ -2387,21 +2572,22 @@ fn serialize(
                                     start_column: begin_pos,
                                     end_column: end_pos,
                                 });
-                            },
+                            }
                             _ => {}
                         }
                     }
-                },
+                }
                 // Rails
-                "belongs_to" |
-                "has_one" |
-                "has_many" |
-                "has_and_belongs_to_many" => {
+                "belongs_to" | "has_one" | "has_many" | "has_and_belongs_to_many" => {
                     if let Some(node) = args.first() {
                         match node {
-                            Node::Sym(Sym { name, expression_l, .. }) => {
-                                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+                            Node::Sym(Sym {
+                                name, expression_l, ..
+                            }) => {
+                                let (lineno, begin_pos) =
+                                    input.line_col_for_pos(expression_l.begin).unwrap();
+                                let (_lineno, end_pos) =
+                                    input.line_col_for_pos(expression_l.end).unwrap();
 
                                 documents.push(FuzzyNode {
                                     category: "assignment",
@@ -2412,38 +2598,37 @@ fn serialize(
                                     start_column: begin_pos,
                                     end_column: end_pos,
                                 });
-                            },
+                            }
                             _ => {}
                         }
                     }
-                },
-                _ => {}
-                // todo: the code below works, but it will pollute searches too
-                // much unless filtering is added when searching
+                }
+                _ => {} // todo: the code below works, but it will pollute searches too
+                        // much unless filtering is added when searching
 
-                // Rspec
-                // "let!" | "let" => {
-                //     if let Some(arg) = args.first() {
-                //         match node {
-                //             Node::Sym(Sym { name, expression_l, .. }) => {
-                //                 let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                //                 let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+                        // Rspec
+                        // "let!" | "let" => {
+                        //     if let Some(arg) = args.first() {
+                        //         match node {
+                        //             Node::Sym(Sym { name, expression_l, .. }) => {
+                        //                 let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                        //                 let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
 
-                //                 documents.push(FuzzyNode {
-                //                     category: "assignment",
-                //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
-                //                     name: name.to_string_lossy(),
-                //                     node_type: "Def",
-                //                     line: lineno,
-                //                     start_column: begin_pos,
-                //                     end_column: end_pos,
-                //                 });
-                //             },
-                //             _ => {}
-                //         }
-                //     }
-                // },
-                // _ => {}
+                        //                 documents.push(FuzzyNode {
+                        //                     category: "assignment",
+                        //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        //                     name: name.to_string_lossy(),
+                        //                     node_type: "Def",
+                        //                     line: lineno,
+                        //                     start_column: begin_pos,
+                        //                     end_column: end_pos,
+                        //                 });
+                        //             },
+                        //             _ => {}
+                        //         }
+                        //     }
+                        // },
+                        // _ => {}
             }
         }
 
@@ -2492,7 +2677,9 @@ fn serialize(
             }
         }
 
-        Node::Sym(Sym { name, expression_l, .. }) => {
+        Node::Sym(Sym {
+            name, expression_l, ..
+        }) => {
             let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
             let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
 

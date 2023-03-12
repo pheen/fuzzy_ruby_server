@@ -26,6 +26,9 @@ async fn main() {
     let persistence = Arc::new(Mutex::new(Persistence::new().unwrap()));
     let cloned_persistence = Arc::clone(&persistence);
 
+    // Spawn a background thread to watch the editor process since it might be
+    // killed and not have a chance to send a shutdown message. This loop also
+    // triggers the file watcher.
     tokio::spawn(async move {
         loop {
             let mut loop_persistence = cloned_persistence.lock().await;
@@ -39,6 +42,11 @@ async fn main() {
             }
 
             match loop_persistence.reindex_modified_files() {
+                Ok(_) => {}
+                Err(_) => {}
+            }
+
+            match loop_persistence.reindex_modified_gems() {
                 Ok(_) => {
                     drop(loop_persistence);
                     tokio::time::sleep(Duration::from_secs(30)).await
