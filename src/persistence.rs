@@ -425,19 +425,10 @@ impl Persistence {
         Ok(())
     }
 
-    pub fn reindex_modified_gems(&mut self) -> tantivy::Result<()> {
-        if self.workspace_path == "unset" {
-            info!("Refusing to reindex workspace as no workspace was found.");
-            return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
-        }
-
-        if self.gems_indexed {
-            return Ok(());
-        }
-
+    pub fn index_gems(&mut self) -> tantivy::Result<()> {
         // Four leading spaces dictates that it's a gem version
         // https://github.com/rubygems/bundler/blob/v2.1.4/lib/bundler/lockfile_parser.rb#L174-L181
-        let gem_version = Regex::new(r"^\s{4}([a-zA-Z\d\.-_]+)\s\(([\d\w\.-_]+)\)").unwrap();
+        let gem_version = Regex::new(r"^\s{4}([a-zA-Z\d\.\-_]+)\s\(([\d\w\.\-_]+)\)").unwrap();
         let gemfile_path = format!("{}/{}", &self.workspace_path, "Gemfile.lock");
 
         if let Ok(gemfile_contents) = fs::read_to_string(gemfile_path) {
