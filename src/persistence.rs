@@ -10,6 +10,7 @@ use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 use log::info;
 use phf::phf_map;
 use psutil::process;
+use tower_lsp::lsp_types::InitializeParams;
 use std::collections::HashMap;
 use std::fs;
 use tantivy::collector::TopDocs;
@@ -269,58 +270,36 @@ impl Persistence {
         })
     }
 
-    pub fn set_process_id(&mut self, process_id: Option<u32>) {
-        self.process_id = process_id;
+    pub fn gems_already_indexed(&self) -> bool {
+        self.gems_indexed
     }
 
-    pub fn editor_process_running(&self) -> bool {
-        if let Ok(pids) = process::pids() {
-            if let Some(editor_pid) = self.process_id {
-                for pid in pids {
-                    if pid == editor_pid {
-                        return true;
-                    }
-                }
+    pub fn initialize(&mut self, params: &InitializeParams) {
+        let uri = params.root_uri.as_ref().unwrap_or_else(|| {
+            info!("root_uri wasn't given to initialize, exiting.");
+            quit::with_code(1);
+        });
 
-                return false;
+        self.workspace_path = uri.path().to_string();
+
+        let user_config = &params.initialization_options.as_ref().unwrap().as_object().unwrap();
+        let allocation_type = user_config.get("allocationType").unwrap().as_str().unwrap();
+
+        self.index = match allocation_type {
+            "ram" => {
+                Some(Index::create_in_ram(self.schema.clone()))
+            },
+            "tempdir" => {
+                Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
+            }
+            _ => {
+                info!("Unknown allocation_type, defaulting to tempdir");
+                Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
             }
         }
-
-        true
-    }
-
-    pub fn set_workspace_path(&mut self, root_uri: Option<tower_lsp::lsp_types::Url>) {
-        if let Some(uri) = root_uri {
-            self.workspace_path = uri.path().to_string();
-
-            // let home_dir = home::home_dir().unwrap();
-            // let home_dir = home_dir.as_path();
-            // let workspace_id = blake3::hash(&self.workspace_path.as_bytes());
-            // let path = Path::new(home_dir)
-            //     .join(".fuzzy_ruby_server")
-            //     .join(workspace_id.to_string());
-
-            // info!("index_path:");
-            // info!("{:#?}", &path);
-
-            // fs::create_dir_all(&path).unwrap();
-
-            self.index = Some(Index::create_in_ram(self.schema.clone()));
-        } else {
-            self.no_workspace = true;
-        }
-    }
-
-    pub fn no_workspace_confirmed(&self) -> bool {
-        self.no_workspace
     }
 
     pub fn reindex_modified_files(&mut self) -> tantivy::Result<()> {
-        if self.workspace_path == "unset" {
-            info!("Refusing to reindex workspace as no workspace was found.");
-            return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
-        }
-
         let start_time = FileTime::from_unix_time(FileTime::now().unix_seconds(), 0).seconds() - 1;
         let last_reindex_time = self.last_reindex_time.clone();
 

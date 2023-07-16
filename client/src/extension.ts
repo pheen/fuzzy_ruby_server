@@ -1,5 +1,6 @@
 import {
   ExtensionContext,
+  workspace,
 } from "vscode";
 
 import {
@@ -41,6 +42,8 @@ export async function activate(_context: ExtensionContext) {
     debug: run,
   };
 
+  const client_config = workspace.getConfiguration("fuzzyRubyServer");
+
   let clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "ruby" }
@@ -48,10 +51,13 @@ export async function activate(_context: ExtensionContext) {
     synchronize: {
       // fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
     },
+    initializationOptions: {
+      allocationType: client_config.get("allocationType"),
+    },
   };
 
   // Create the language client and start the client.
-  client = new LanguageClient("fuzzy-ruby-language-server", "Fuzzy Ruby Language Server", serverOptions, clientOptions);
+  client = new LanguageClient("fuzzy-ruby-server", "Fuzzy Ruby Server", serverOptions, clientOptions);
   client.start();
 }
 

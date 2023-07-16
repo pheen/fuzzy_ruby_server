@@ -41,23 +41,17 @@
     ],
     "configuration": {
       "type": "object",
-      "title": "fuzzy-ruby-language-server",
+      "title": "Fuzzy Ruby Server",
       "properties": {
-        "fuzzy-ruby-language-server.trace.server": {
-          "type": "string",
+        "fuzzyRubyServer.allocationType": {
           "scope": "window",
+          "type": "string",
           "enum": [
-            "off",
-            "messages",
-            "verbose"
+            "tempdir",
+            "ram"
           ],
-          "enumDescriptions": [
-            "No traces",
-            "Error only",
-            "Full log"
-          ],
-          "default": "off",
-          "description": "Traces the communication between VS Code and the language server."
+          "default": "tempdir",
+          "description": "Set if the search index should be purely in-mmemory (ram) or swapped to disk with mmap (tempdir)"
         }
       }
     }

@@ -3,6 +3,7 @@ mod persistence;
 use persistence::Persistence;
 
 use log::info;
+use psutil::process;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::*;
@@ -24,37 +25,6 @@ async fn main() {
     let stdout = tokio::io::stdout();
 
     let persistence = Arc::new(Mutex::new(Persistence::new().unwrap()));
-    let cloned_persistence = Arc::clone(&persistence);
-
-    // Spawn a background thread to watch the editor process since it might be
-    // killed and not have a chance to send a shutdown message. This loop also
-    // triggers the file watcher.
-    tokio::spawn(async move {
-        loop {
-            let mut loop_persistence = cloned_persistence.lock().await;
-
-            if !loop_persistence.editor_process_running() {
-                quit::with_code(1);
-            }
-
-            if loop_persistence.no_workspace_confirmed() {
-                quit::with_code(1);
-            }
-
-            match loop_persistence.reindex_modified_files() {
-                Ok(_) => {}
-                Err(_) => {}
-            }
-
-            match loop_persistence.reindex_modified_gems() {
-                Ok(_) => {
-                    drop(loop_persistence);
-                    tokio::time::sleep(Duration::from_secs(30)).await
-                }
-                Err(_) => {}
-            }
-        }
-    });
 
     let (service, socket) = LspService::new(|client| Backend {
         client,
@@ -68,9 +38,44 @@ async fn main() {
 impl LanguageServer for Backend {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         let mut persistence = self.persistence.lock().await;
+        persistence.initialize(&params);
+        drop(persistence);
 
-        persistence.set_process_id(params.process_id);
-        persistence.set_workspace_path(params.root_uri);
+        tokio::spawn(async move {
+            loop {
+                let editor_process_id = params.process_id.unwrap_or_else(|| {
+                    quit::with_code(1)
+                });
+
+                let editor_process_running = psutil::process::processes().unwrap()
+                    .into_iter()
+                    .filter_map(|process| process.ok())
+                    .find(|process| process.pid() == editor_process_id);
+
+                if let None = editor_process_running {
+                    quit::with_code(1);
+                }
+
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        });
+
+        let background_persistence = Arc::clone(&self.persistence);
+
+        tokio::spawn(async move {
+            loop {
+                let mut persistence = background_persistence.lock().await;
+
+                persistence.reindex_modified_files();
+
+                // if !persistence.gems_already_indexed() {
+                //     persistence.index_gems();
+                // }
+
+                drop(persistence);
+                tokio::time::sleep(Duration::from_secs(120)).await
+            }
+        });
 
         Ok(InitializeResult {
             server_info: None,
