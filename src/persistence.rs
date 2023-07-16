@@ -1,15 +1,12 @@
-use std::thread;
 use std::str;
 use std::process::Command;
 use filetime::FileTime;
 use regex::Regex;
-// use home;
 use jwalk::WalkDirGeneric;
 use lib_ruby_parser::source::DecodedInput;
 use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 use log::info;
 use phf::phf_map;
-use psutil::process;
 use tower_lsp::lsp_types::InitializeParams;
 use std::collections::HashMap;
 use std::fs;
@@ -150,6 +147,7 @@ pub struct Persistence {
     process_id: Option<u32>,
     no_workspace: bool,
     gems_indexed: bool,
+    index_interface_only: bool,
 }
 
 struct SchemaFields {
@@ -256,6 +254,7 @@ impl Persistence {
         let process_id: Option<u32> = None;
         let no_workspace = false;
         let gems_indexed = false;
+        let index_interface_only = false;
 
         Ok(Self {
             schema,
@@ -267,6 +266,7 @@ impl Persistence {
             process_id,
             no_workspace,
             gems_indexed,
+            index_interface_only,
         })
     }
 
@@ -337,7 +337,7 @@ impl Persistence {
 
         let mut visible_file_paths = Vec::new();
         let mut new_indexable_file_paths = Vec::new();
-        let mut deletable_file_paths = Vec::new();
+        // let mut deletable_file_paths = Vec::new();
 
         for entry in walk_dir {
             let path = entry.unwrap().path();
@@ -357,31 +357,31 @@ impl Persistence {
             }
         }
 
-        for path in &self.indexed_file_paths {
-            if !&visible_file_paths.contains(path) {
-                deletable_file_paths.push(path);
-            }
-        }
+        // for path in &self.indexed_file_paths {
+        //     if !&visible_file_paths.contains(path) {
+        //         deletable_file_paths.push(path);
+        //     }
+        // }
 
         if let Some(index) = &self.index {
-            let mut index_writer = index.writer(50_000_000).unwrap();
+            let mut index_writer = index.writer(100_000_000).unwrap();
 
-            for path in deletable_file_paths {
-                let relative_path = path.replace(&self.workspace_path, "");
+            // for path in deletable_file_paths {
+            //     let relative_path = path.replace(&self.workspace_path, "");
 
-                info!("Deleting relative path: {:#?}", relative_path);
+            //     info!("Deleting relative path: {:#?}", relative_path);
 
-                let file_path_id = blake3::hash(&relative_path.as_bytes());
-                let path_term = Term::from_field_text(
-                    self.schema_fields.file_path_id,
-                    &file_path_id.to_string(),
-                );
+            //     let file_path_id = blake3::hash(&relative_path.as_bytes());
+            //     let path_term = Term::from_field_text(
+            //         self.schema_fields.file_path_id,
+            //         &file_path_id.to_string(),
+            //     );
 
-                index_writer.delete_term(path_term);
-            }
+            //     index_writer.delete_term(path_term);
+            // }
 
             // index_writer.delete_all_documents();
-            index_writer.commit();
+            // index_writer.commit();
 
             for path in &new_indexable_file_paths {
                 // info!("Indexing path:");
@@ -408,6 +408,8 @@ impl Persistence {
     pub fn index_gems(&mut self) -> tantivy::Result<()> {
         if self.gems_indexed { return Ok(()) }
 
+        self.index_interface_only = true;
+
         // Four leading spaces dictates that it's a gem version
         // https://github.com/rubygems/bundler/blob/v2.1.4/lib/bundler/lockfile_parser.rb#L174-L181
         let gem_version = Regex::new(r"^\s{4}([a-zA-Z\d\.\-_]+)\s\(([\d\w\.\-_]+)\)").unwrap();
@@ -419,7 +421,8 @@ impl Persistence {
 
             let gem_home_path_result = Command::new("sh")
                 .arg("-c")
-                .arg(format!("eval \"$(/usr/local/bin/rbenv init -)\" && cd {} && gem environment home", &self.workspace_path))
+                // .arg(format!("eval \"$(/usr/local/bin/rbenv init -)\" && cd {} && gem environment home", &self.workspace_path))
+                .arg(format!("cd {} && gem environment home", &self.workspace_path))
                 .output();
 
             if let Ok(gem_home_path) = gem_home_path_result {
@@ -453,84 +456,89 @@ impl Persistence {
                 }
             }
 
+
+            let index = match &self.index {
+                Some(index) => index,
+                None => {
+                    info!("missing index");
+                    quit::with_code(1);
+                }
+            };
+
+            let mut index_writer = index.writer(100_000_000).unwrap();
+
             for gem_path in gem_paths {
-                // thread::spawn(|| {
+                info!("Starting indexing gem path: {:#?}", gem_path);
 
-                    info!("Starting indexing gem path: {:#?}", gem_path);
-
-                    let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone()).process_read_dir(
-                        move |_depth, _path, _read_dir_state, children| {
-                            children.retain(|dir_entry_result| {
-                                dir_entry_result
-                                    .as_ref()
-                                    .map(|dir_entry| {
-                                        if let Some(file_name) = dir_entry.file_name.to_str() {
-                                            let ruby_file = file_name.ends_with(".rb");
-                                            dir_entry.file_type.is_dir() || ruby_file
-                                        } else {
-                                            false
-                                        }
-                                    })
-                                    .unwrap_or(false)
-                            });
-
-                            children.iter_mut().for_each(|dir_entry_result| {
-                                if let Ok(dir_entry) = dir_entry_result {
+                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone()).process_read_dir(
+                    move |_depth, _path, _read_dir_state, children| {
+                        children.retain(|dir_entry_result| {
+                            dir_entry_result
+                                .as_ref()
+                                .map(|dir_entry| {
                                     if let Some(file_name) = dir_entry.file_name.to_str() {
-                                        if file_name.contains("node_modules")
-                                            || file_name.contains("vendor")
-                                            || file_name.contains("tmp")
-                                            || file_name.contains(".git")
-                                        {
-                                            dir_entry.read_children_path = None;
-                                        }
+                                        let ruby_file = file_name.ends_with(".rb");
+                                        dir_entry.file_type.is_dir() || ruby_file
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false)
+                        });
+
+                        children.iter_mut().for_each(|dir_entry_result| {
+                            if let Ok(dir_entry) = dir_entry_result {
+                                if let Some(file_name) = dir_entry.file_name.to_str() {
+                                    if file_name.contains("node_modules")
+                                        || file_name.contains("vendor")
+                                        || file_name.contains("tmp")
+                                        || file_name.contains(".git")
+                                    {
+                                        dir_entry.read_children_path = None;
                                     }
                                 }
-                            });
-                        },
-                    );
+                            }
+                        });
+                    },
+                );
 
-                    let mut indexable_file_paths = Vec::new();
+                let mut indexable_file_paths = Vec::new();
 
-                    for entry in walk_dir {
-                        let path = entry.unwrap().path();
-                        let path = path.to_str().unwrap();
-                        let ruby_file = path.ends_with(".rb");
+                for entry in walk_dir {
+                    let path = entry.unwrap().path();
+                    let path = path.to_str().unwrap();
+                    let ruby_file = path.ends_with(".rb");
 
-                        if ruby_file {
-                            indexable_file_paths.push(path.to_string());
-                        }
+                    if ruby_file {
+                        indexable_file_paths.push(path.to_string());
                     }
+                }
 
-                    if let Some(index) = &self.index {
-                        let mut index_writer = index.writer(50_000_000).unwrap();
+                for path in &indexable_file_paths {
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        let uri = Url::from_file_path(&path).unwrap();
+                        let relative_path = uri.path().replace(&self.workspace_path, "");
 
-                        for path in &indexable_file_paths {
-                            let text = fs::read_to_string(&path).unwrap();
-                            let uri = Url::from_file_path(&path).unwrap();
-                            let relative_path = uri.path().replace(&self.workspace_path, "");
-
-                            self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
-                        }
-
-                        index_writer.commit().unwrap();
+                        self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
                     }
-                // });
+                }
 
                 info!("Finished indexing gem path: {:#?}", gem_path);
             }
+
+            index_writer.commit().unwrap();
         } else {
             info!("Gemfile not found, skipping indexing workspace gems.");
-            // return Err(tantivy::TantivyError::ErrorInThread("bla".to_string()));
         }
 
         self.gems_indexed = true;
+        self.index_interface_only = false;
 
         Ok(())
     }
 
     pub fn reindex_modified_file_without_commit(
-        &self,
+        &mut self,
         text: &String,
         relative_path: String,
         index_writer: &IndexWriter,
@@ -539,7 +547,7 @@ impl Persistence {
         if let Some(_) = &self.index {
             let mut documents = Vec::new();
 
-            let diagnostics = match parse(text, &mut documents) {
+            let diagnostics = match self.parse(text, &mut documents) {
                 Ok(diagnostics) => diagnostics,
                 Err(diagnostics) => {
                     // Return early so existing documents are not deleted when
@@ -602,15 +610,15 @@ impl Persistence {
     }
 
     pub fn reindex_modified_file(
-        &self,
+        &mut self,
         text: &String,
         uri: &Url,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         if let Some(index) = &self.index {
-            let mut index_writer = index.writer(50_000_000)?;
+            let mut index_writer = index.writer(100_000_000)?;
             let mut documents = Vec::new();
 
-            let diagnostics = match parse(text, &mut documents) {
+            let diagnostics = match self.parse(text, &mut documents) {
                 Ok(diagnostics) => diagnostics,
                 Err(diagnostics) => {
                     // Return early so existing documents are not deleted when
@@ -691,14 +699,14 @@ impl Persistence {
     }
 
     pub fn diagnostics(
-        &self,
+        &mut self,
         text: &String,
         _uri: &Url,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         let mut documents = Vec::new();
 
         if let Some(_) = &self.index {
-            match parse(text, &mut documents) {
+            match self.parse(text, &mut documents) {
                 Ok(diagnostics) => Ok(diagnostics),
                 Err(diagnostics) => Ok(diagnostics),
             }
@@ -1343,1130 +1351,1333 @@ impl Persistence {
 
         symbol_infos
     }
-}
 
-fn parse(
-    contents: &String,
-    documents: &mut Vec<FuzzyNode>,
-) -> Result<
-    Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
-    Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
-> {
-    let options = ParserOptions {
-        buffer_name: "(eval)".to_string(),
-        record_tokens: false,
-        ..Default::default()
-    };
-    let parser = Parser::new(contents.to_string(), options);
-    let parser_result = parser.do_parse();
-    let input = parser_result.input;
+    fn parse(
+        &mut self,
+        contents: &String,
+        documents: &mut Vec<FuzzyNode>,
+    ) -> Result<
+        Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
+        Vec<Option<tower_lsp::lsp_types::Diagnostic>>,
+    > {
+        let options = ParserOptions {
+            buffer_name: "(eval)".to_string(),
+            record_tokens: false,
+            ..Default::default()
+        };
+        let parser = Parser::new(contents.to_string(), options);
+        let parser_result = parser.do_parse();
+        let input = parser_result.input;
 
-    let mut diagnostics = vec![];
+        let mut diagnostics = vec![];
 
-    for parser_diagnostic in parser_result.diagnostics {
-        diagnostics.push(lsp_diagnostic(parser_diagnostic, &input));
+        for parser_diagnostic in parser_result.diagnostics {
+            diagnostics.push(self.lsp_diagnostic(parser_diagnostic, &input));
+        }
+
+        let ast = match parser_result.ast {
+            Some(a) => *a,
+            None => return Err(diagnostics),
+        };
+
+        let mut scope = Vec::new();
+
+        self.serialize(&ast, documents, &mut scope, &input);
+
+        Ok(diagnostics)
     }
 
-    let ast = match parser_result.ast {
-        Some(a) => *a,
-        None => return Err(diagnostics),
-    };
-
-    let mut scope = Vec::new();
-
-    serialize(&ast, documents, &mut scope, &input);
-
-    Ok(diagnostics)
-}
-
-fn lsp_diagnostic(
-    parser_diagnostic: lib_ruby_parser::Diagnostic,
-    input: &DecodedInput,
-) -> Option<tower_lsp::lsp_types::Diagnostic> {
-    let diagnostic = || -> Option<tower_lsp::lsp_types::Diagnostic> {
-        let (begin_lineno, start_column) =
-            input.line_col_for_pos(parser_diagnostic.loc.begin).unwrap();
-        let (end_lineno, end_column) = input.line_col_for_pos(parser_diagnostic.loc.end).unwrap();
-        let start_position = Position::new(
-            begin_lineno.try_into().unwrap(),
-            start_column.try_into().unwrap(),
-        );
-        let end_position = Position::new(
-            end_lineno.try_into().unwrap(),
-            end_column.try_into().unwrap(),
-        );
-
-        Some(tower_lsp::lsp_types::Diagnostic::new_simple(
-            Range::new(start_position, end_position),
-            parser_diagnostic.message.render(),
-        ))
-    }();
-
-    diagnostic
-}
-
-fn serialize(
-    node: &Node,
-    documents: &mut Vec<FuzzyNode>,
-    fuzzy_scope: &mut Vec<String>,
-    input: &DecodedInput,
-) {
-    match &node {
-        Node::Alias(Alias { to, from, .. }) => {
-            if let Node::Sym(sym) = *to.to_owned() {
-                let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
-
-                documents.push(FuzzyNode {
-                    category: "assignment",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: sym.name.to_string_lossy(),
-                    node_type: "Alias",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
-            }
-
-            if let Node::Sym(sym) = *from.to_owned() {
-                let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
-
-                documents.push(FuzzyNode {
-                    category: "usage",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: sym.name.to_string_lossy(),
-                    node_type: "Alias",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
-            }
-        }
-
-        Node::And(And { lhs, rhs, .. }) => {
-            serialize(lhs, documents, fuzzy_scope, input);
-            serialize(rhs, documents, fuzzy_scope, input);
-        }
-
-        Node::AndAsgn(AndAsgn { recv, value, .. }) => {
-            serialize(recv, documents, fuzzy_scope, input);
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Arg(Arg { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Arg",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Args(Args { args, .. }) => {
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Array(Array { elements, .. }) => {
-            for node in elements {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::ArrayPattern(ArrayPattern { elements, .. }) => {
-            for node in elements {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::ArrayPatternWithTail(ArrayPatternWithTail { elements, .. }) => {
-            for node in elements {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::BackRef(BackRef { .. }) => {}
-        Node::Begin(Begin { statements, .. }) => {
-            for child_node in statements {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Block(Block {
-            call, args, body, ..
-        }) => {
-            serialize(call, documents, fuzzy_scope, input);
-
-            for child_node in args {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Blockarg(Blockarg { .. }) => {}
-        Node::BlockPass(BlockPass { value, .. }) => {
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Break(Break { args, .. }) => {
-            for child_node in args {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Case(Case {
-            expr,
-            when_bodies,
-            else_body,
-            ..
-        }) => {
-            if let Some(child_node) = expr {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            for child_node in when_bodies {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = else_body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::CaseMatch(CaseMatch {
-            expr,
-            in_bodies,
-            else_body,
-            ..
-        }) => {
-            serialize(expr, documents, fuzzy_scope, input);
-
-            for child_node in in_bodies {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = else_body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Casgn(Casgn {
-            scope,
-            name,
-            value,
-            name_l,
-            ..
-        }) => {
-            // todo: improve fuzzy_scope by using scope
-
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Casgn",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = scope {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Cbase(Cbase { .. }) => {}
-        Node::Class(Class {
-            name,
-            superclass,
-            body,
-            ..
-        }) => {
-            if let Node::Const(const_node) = *name.to_owned() {
-                let (lineno, begin_pos) = input
-                    .line_col_for_pos(const_node.expression_l.begin)
-                    .unwrap();
-                let (_lineno, end_pos) =
-                    input.line_col_for_pos(const_node.expression_l.end).unwrap();
-                let class_name = const_node.name.to_string();
-
-                documents.push(FuzzyNode {
-                    category: "assignment",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: class_name.clone(),
-                    node_type: "Class",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
-
-                fuzzy_scope.push(class_name);
-
-                if let Some(superclass_node) = superclass {
-                    serialize(superclass_node, documents, fuzzy_scope, input);
-                }
-
-                for child_node in body {
-                    serialize(child_node, documents, fuzzy_scope, input);
-                }
-
-                fuzzy_scope.pop();
-            }
-        }
-
-        // Node::Complex(Complex { .. }) => {}
-        Node::Const(Const {
-            scope,
-            name,
-            name_l,
-            ..
-        }) => {
-            // todo: improve fuzzy_scope by using scope
-
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Const",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = scope {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::ConstPattern(ConstPattern {
-            const_, pattern, ..
-        }) => {
-            serialize(const_, documents, fuzzy_scope, input);
-            serialize(pattern, documents, fuzzy_scope, input);
-        }
-
-        Node::CSend(CSend {
-            recv,
-            method_name,
-            args,
-            selector_l,
-            ..
-        }) => {
-            if let Some(loc) = selector_l {
-                let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
-
-                documents.push(FuzzyNode {
-                    category: "usage",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: method_name.to_string(),
-                    node_type: "CSend",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
-            }
-
-            serialize(recv, documents, fuzzy_scope, input);
-
-            for child_node in args {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Cvar(Cvar { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Cvar",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Cvasgn(Cvasgn {
-            name,
-            value,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Cvasgn",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Def(Def {
-            name,
-            args,
-            body,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Def",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            fuzzy_scope.push(name.to_string());
-
-            if let Some(child_node) = args {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            fuzzy_scope.pop();
-        }
-
-        Node::Defined(Defined { value, .. }) => {
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Defs(Defs {
-            name,
-            args,
-            body,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Defs",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            let mut scope_name = "self.".to_owned();
-            scope_name.push_str(name);
-
-            fuzzy_scope.push(scope_name);
-
-            if let Some(child_node) = args {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            fuzzy_scope.pop();
-        }
-
-        Node::Dstr(Dstr { parts, .. }) => {
-            for child_node in parts {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Dsym(Dsym { parts, .. }) => {
-            for child_node in parts {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::EFlipFlop(EFlipFlop { left, right, .. }) => {
-            if let Some(child_node) = left {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = right {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::EmptyElse(EmptyElse { .. }) => {}
-        // Node::Encoding(Encoding { .. }) => {}
-        Node::Ensure(Ensure { body, ensure, .. }) => {
-            if let Some(child_node) = body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = ensure {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Erange(Erange { left, right, .. }) => {
-            if let Some(child_node) = left {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = right {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::False(False { .. }) => {}
-        // Node::File(File { .. }) => {}
-        Node::FindPattern(FindPattern { elements, .. }) => {
-            for child_node in elements {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Float(Float { .. }) => {}
-        Node::For(For {
-            iterator,
-            iteratee,
-            body,
-            ..
-        }) => {
-            serialize(iterator, documents, fuzzy_scope, input);
-            serialize(iteratee, documents, fuzzy_scope, input);
-
-            for child_node in body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::ForwardArg(ForwardArg { .. }) => {}
-        // Node::ForwardedArgs(ForwardedArgs { .. }) => {}
-        Node::Gvar(Gvar { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Gvar",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Gvasgn(Gvasgn {
-            name,
-            value,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Gvasgn",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Hash(Hash { pairs, .. }) => {
-            for child_node in pairs {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::HashPattern(HashPattern { elements, .. }) => {
-            for child_node in elements {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Heredoc(Heredoc { parts, .. }) => {
-            for child_node in parts {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::If(If {
-            cond,
-            if_true,
-            if_false,
-            ..
-        }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-
-            if let Some(child_node) = if_true {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = if_false {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::IfGuard(IfGuard { cond, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-        }
-
-        Node::IFlipFlop(IFlipFlop { left, right, .. }) => {
-            if let Some(child_node) = left {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = right {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::IfMod(IfMod {
-            cond,
-            if_true,
-            if_false,
-            ..
-        }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-
-            if let Some(child_node) = if_true {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = if_false {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::IfTernary(IfTernary {
-            cond,
-            if_true,
-            if_false,
-            ..
-        }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-            serialize(if_true, documents, fuzzy_scope, input);
-            serialize(if_false, documents, fuzzy_scope, input);
-        }
-
-        Node::Index(lib_ruby_parser::nodes::Index { recv, indexes, .. }) => {
-            serialize(recv, documents, fuzzy_scope, input);
-
-            for child_node in indexes {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::IndexAsgn(IndexAsgn {
-            recv,
-            indexes,
-            value,
-            ..
-        }) => {
-            serialize(recv, documents, fuzzy_scope, input);
-
-            for child_node in indexes {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::InPattern(InPattern {
-            pattern,
-            guard,
-            body,
-            ..
-        }) => {
-            serialize(pattern, documents, fuzzy_scope, input);
-
-            if let Some(child_node) = guard {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = body {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Int(Int { .. }) => {}
-        Node::Irange(Irange { left, right, .. }) => {
-            if let Some(child_node) = left {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-
-            if let Some(child_node) = right {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Ivar(Ivar { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Ivar",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Ivasgn(Ivasgn {
-            name,
-            value,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Ivasgn",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Kwarg(Kwarg { name, name_l, .. }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Kwarg",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Kwargs(Kwargs { pairs, .. }) => {
-            for node in pairs {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::KwBegin(KwBegin { statements, .. }) => {
-            for node in statements {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Kwnilarg(Kwnilarg { .. }) => {}
-        Node::Kwoptarg(Kwoptarg {
-            name,
-            default,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Kwoptarg",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            serialize(default, documents, fuzzy_scope, input);
-        }
-
-        Node::Kwrestarg(Kwrestarg { name, name_l, .. }) => {
-            if let Some(node_name) = name {
-                if let Some(loc) = name_l {
-                    let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
-                    let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+    fn lsp_diagnostic(
+        &mut self,
+        parser_diagnostic: lib_ruby_parser::Diagnostic,
+        input: &DecodedInput,
+    ) -> Option<tower_lsp::lsp_types::Diagnostic> {
+        let diagnostic = || -> Option<tower_lsp::lsp_types::Diagnostic> {
+            let (begin_lineno, start_column) =
+                input.line_col_for_pos(parser_diagnostic.loc.begin).unwrap();
+            let (end_lineno, end_column) = input.line_col_for_pos(parser_diagnostic.loc.end).unwrap();
+            let start_position = Position::new(
+                begin_lineno.try_into().unwrap(),
+                start_column.try_into().unwrap(),
+            );
+            let end_position = Position::new(
+                end_lineno.try_into().unwrap(),
+                end_column.try_into().unwrap(),
+            );
+
+            Some(tower_lsp::lsp_types::Diagnostic::new_simple(
+                Range::new(start_position, end_position),
+                parser_diagnostic.message.render(),
+            ))
+        }();
+
+        diagnostic
+    }
+
+    fn serialize(
+        &mut self,
+        node: &Node,
+        documents: &mut Vec<FuzzyNode>,
+        fuzzy_scope: &mut Vec<String>,
+        input: &DecodedInput,
+    ) {
+        match &node {
+            Node::Alias(Alias { to, from, .. }) => {
+                if let Node::Sym(sym) = *to.to_owned() {
+                    let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
 
                     documents.push(FuzzyNode {
                         category: "assignment",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                        name: node_name.to_string(),
-                        node_type: "Kwrestarg",
+                        name: sym.name.to_string_lossy(),
+                        node_type: "Alias",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+                }
+
+                if let Node::Sym(sym) = *from.to_owned() {
+                    let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
+
+                    documents.push(FuzzyNode {
+                        category: "usage",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: sym.name.to_string_lossy(),
+                        node_type: "Alias",
                         line: lineno,
                         start_column: begin_pos,
                         end_column: end_pos,
                     });
                 }
             }
-        }
 
-        Node::Kwsplat(Kwsplat { value, .. }) => {
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        // Node::Lambda(Lambda { .. }) => {}
-        // Node::Line(Line { .. }) => {}
-        Node::Lvar(Lvar { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Lvar",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Lvasgn(Lvasgn {
-            name,
-            value,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Lvasgn",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            if let Some(child_node) = value {
-                serialize(child_node, documents, fuzzy_scope, input);
+            Node::And(And { lhs, rhs, .. }) => {
+                self.serialize(lhs, documents, fuzzy_scope, input);
+                self.serialize(rhs, documents, fuzzy_scope, input);
             }
-        }
 
-        Node::Masgn(Masgn { lhs, rhs, .. }) => {
-            serialize(lhs, documents, fuzzy_scope, input);
-            serialize(rhs, documents, fuzzy_scope, input);
-        }
-
-        Node::MatchAlt(MatchAlt { lhs, rhs, .. }) => {
-            serialize(lhs, documents, fuzzy_scope, input);
-            serialize(rhs, documents, fuzzy_scope, input);
-        }
-
-        Node::MatchAs(MatchAs { value, as_, .. }) => {
-            serialize(value, documents, fuzzy_scope, input);
-            serialize(as_, documents, fuzzy_scope, input);
-        }
-
-        Node::MatchCurrentLine(MatchCurrentLine { re, .. }) => {
-            serialize(re, documents, fuzzy_scope, input);
-        }
-
-        // Node::MatchNilPattern(MatchNilPattern { .. }) => {}
-        Node::MatchPattern(MatchPattern { value, pattern, .. }) => {
-            serialize(value, documents, fuzzy_scope, input);
-            serialize(pattern, documents, fuzzy_scope, input);
-        }
-
-        Node::MatchPatternP(MatchPatternP { value, pattern, .. }) => {
-            serialize(value, documents, fuzzy_scope, input);
-            serialize(pattern, documents, fuzzy_scope, input);
-        }
-
-        Node::MatchRest(MatchRest { name, .. }) => {
-            if let Some(child_node) = name {
-                serialize(child_node, documents, fuzzy_scope, input);
+            Node::AndAsgn(AndAsgn { recv, value, .. }) => {
+                self.serialize(recv, documents, fuzzy_scope, input);
+                self.serialize(value, documents, fuzzy_scope, input);
             }
-        }
 
-        Node::MatchVar(MatchVar { name, name_l, .. }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "MatchVar",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::MatchWithLvasgn(MatchWithLvasgn { re, value, .. }) => {
-            serialize(re, documents, fuzzy_scope, input);
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Mlhs(Mlhs { items, .. }) => {
-            for node in items {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Module(Module { name, body, .. }) => {
-            if let Node::Const(const_node) = *name.to_owned() {
-                let (lineno, begin_pos) = input
-                    .line_col_for_pos(const_node.expression_l.begin)
-                    .unwrap();
-                let (_lineno, end_pos) =
-                    input.line_col_for_pos(const_node.expression_l.end).unwrap();
-                let class_name = const_node.name.to_string();
+            Node::Arg(Arg { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
 
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: class_name.clone(),
-                    node_type: "Module",
+                    name: name.to_string(),
+                    node_type: "Arg",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Args(Args { args, .. }) => {
+                if self.index_interface_only { return; }
+
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Array(Array { elements, .. }) => {
+                for node in elements {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::ArrayPattern(ArrayPattern { elements, .. }) => {
+                for node in elements {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::ArrayPatternWithTail(ArrayPatternWithTail { elements, .. }) => {
+                for node in elements {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::BackRef(BackRef { .. }) => {}
+            Node::Begin(Begin { statements, .. }) => {
+                for child_node in statements {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Block(Block {
+                call, args, body, ..
+            }) => {
+                if self.index_interface_only { return; }
+
+                self.serialize(call, documents, fuzzy_scope, input);
+
+                for child_node in args {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Blockarg(Blockarg { .. }) => {}
+            Node::BlockPass(BlockPass { value, .. }) => {
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Break(Break { args, .. }) => {
+                for child_node in args {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Case(Case {
+                expr,
+                when_bodies,
+                else_body,
+                ..
+            }) => {
+                if let Some(child_node) = expr {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                for child_node in when_bodies {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = else_body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::CaseMatch(CaseMatch {
+                expr,
+                in_bodies,
+                else_body,
+                ..
+            }) => {
+                self.serialize(expr, documents, fuzzy_scope, input);
+
+                for child_node in in_bodies {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = else_body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Casgn(Casgn {
+                scope,
+                name,
+                value,
+                name_l,
+                ..
+            }) => {
+                // todo: improve fuzzy_scope by using scope
+
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Casgn",
                     line: lineno,
                     start_column: begin_pos,
                     end_column: end_pos,
                 });
 
-                fuzzy_scope.push(class_name);
-
-                for child_node in body {
-                    serialize(child_node, documents, fuzzy_scope, input);
+                if let Some(child_node) = scope {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
                 }
 
-                fuzzy_scope.pop();
-            }
-        }
-
-        Node::Next(Next { args, .. }) => {
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Nil(Nil { .. }) => {}
-        // Node::NthRef(NthRef { .. }) => {}
-        Node::Numblock(Numblock { call, body, .. }) => {
-            serialize(call, documents, fuzzy_scope, input);
-            serialize(body, documents, fuzzy_scope, input);
-        }
-
-        Node::OpAsgn(OpAsgn { recv, value, .. }) => {
-            serialize(recv, documents, fuzzy_scope, input);
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Optarg(Optarg {
-            name,
-            default,
-            name_l,
-            ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Optarg",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-
-            serialize(default, documents, fuzzy_scope, input);
-        }
-
-        Node::Or(Or { lhs, rhs, .. }) => {
-            serialize(lhs, documents, fuzzy_scope, input);
-            serialize(rhs, documents, fuzzy_scope, input);
-        }
-
-        Node::OrAsgn(OrAsgn { recv, value, .. }) => {
-            serialize(recv, documents, fuzzy_scope, input);
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Pair(Pair { key, value, .. }) => {
-            serialize(key, documents, fuzzy_scope, input);
-            serialize(value, documents, fuzzy_scope, input);
-        }
-
-        Node::Pin(Pin { var, .. }) => {
-            serialize(var, documents, fuzzy_scope, input);
-        }
-
-        Node::Postexe(Postexe { body, .. }) => {
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Preexe(Preexe { body, .. }) => {
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Procarg0(Procarg0 { args, .. }) => {
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Rational(Rational { .. }) => {}
-        // Node::Redo(Redo { .. }) => {}
-        Node::Regexp(Regexp { parts, options, .. }) => {
-            for node in parts {
-                serialize(node, documents, fuzzy_scope, input);
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
             }
 
-            for node in options {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::RegOpt(RegOpt { .. }) => {}
-        Node::Rescue(Rescue {
-            body,
-            rescue_bodies,
-            ..
-        }) => {
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-
-            for node in rescue_bodies {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::RescueBody(RescueBody {
-            exc_list,
-            exc_var,
-            body,
-            ..
-        }) => {
-            for node in exc_list {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-
-            for node in exc_var {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::Restarg(Restarg { name, name_l, .. }) => {
-            if let Some(name_str) = name {
-                if let Some(loc) = name_l {
-                    let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
-                    let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+            // Node::Cbase(Cbase { .. }) => {}
+            Node::Class(Class {
+                name,
+                superclass,
+                body,
+                ..
+            }) => {
+                if let Node::Const(const_node) = *name.to_owned() {
+                    let (lineno, begin_pos) = input
+                        .line_col_for_pos(const_node.expression_l.begin)
+                        .unwrap();
+                    let (_lineno, end_pos) =
+                        input.line_col_for_pos(const_node.expression_l.end).unwrap();
+                    let class_name = const_node.name.to_string();
 
                     documents.push(FuzzyNode {
                         category: "assignment",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                        name: name_str.to_string(),
-                        node_type: "Restarg",
+                        name: class_name.clone(),
+                        node_type: "Class",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+
+                    fuzzy_scope.push(class_name);
+
+                    if let Some(superclass_node) = superclass {
+                        self.serialize(superclass_node, documents, fuzzy_scope, input);
+                    }
+
+                    for child_node in body {
+                        self.serialize(child_node, documents, fuzzy_scope, input);
+                    }
+
+                    fuzzy_scope.pop();
+                }
+            }
+
+            // Node::Complex(Complex { .. }) => {}
+            Node::Const(Const {
+                scope,
+                name,
+                name_l,
+                ..
+            }) => {
+                // todo: improve fuzzy_scope by using scope
+
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "usage",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Const",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if let Some(child_node) = scope {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::ConstPattern(ConstPattern {
+                const_, pattern, ..
+            }) => {
+                self.serialize(const_, documents, fuzzy_scope, input);
+                self.serialize(pattern, documents, fuzzy_scope, input);
+            }
+
+            Node::CSend(CSend {
+                recv,
+                method_name,
+                args,
+                selector_l,
+                ..
+            }) => {
+                if let Some(loc) = selector_l {
+                    let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+
+                    documents.push(FuzzyNode {
+                        category: "usage",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: method_name.to_string(),
+                        node_type: "CSend",
                         line: lineno,
                         start_column: begin_pos,
                         end_column: end_pos,
                     });
                 }
-            }
-        }
 
-        // Node::Retry(Retry { .. }) => {}
-        Node::Return(Return { args, .. }) => {
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
+                self.serialize(recv, documents, fuzzy_scope, input);
 
-        Node::SClass(SClass { expr, body, .. }) => {
-            serialize(expr, documents, fuzzy_scope, input);
-
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Self_(Self_ { .. }) => {}
-        Node::Send(Send {
-            recv,
-            method_name,
-            args,
-            selector_l,
-            ..
-        }) => {
-            if let Some(node) = recv {
-                serialize(node, documents, fuzzy_scope, input);
+                for child_node in args {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
             }
 
-            if let Some(loc) = selector_l {
-                let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+            Node::Cvar(Cvar { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
 
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: method_name.to_string(),
+                    name: name.to_string(),
+                    node_type: "Cvar",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Cvasgn(Cvasgn {
+                name,
+                value,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Cvasgn",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Def(Def {
+                name,
+                args,
+                body,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Def",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if self.index_interface_only { return; }
+
+                fuzzy_scope.push(name.to_string());
+
+                if let Some(child_node) = args {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                fuzzy_scope.pop();
+            }
+
+            Node::Defined(Defined { value, .. }) => {
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            Node::Defs(Defs {
+                name,
+                args,
+                body,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Defs",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if self.index_interface_only { return; }
+
+                let mut scope_name = "self.".to_owned();
+                scope_name.push_str(name);
+
+                fuzzy_scope.push(scope_name);
+
+                if let Some(child_node) = args {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                fuzzy_scope.pop();
+            }
+
+            Node::Dstr(Dstr { parts, .. }) => {
+                for child_node in parts {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Dsym(Dsym { parts, .. }) => {
+                for child_node in parts {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::EFlipFlop(EFlipFlop { left, right, .. }) => {
+                if let Some(child_node) = left {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = right {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::EmptyElse(EmptyElse { .. }) => {}
+            // Node::Encoding(Encoding { .. }) => {}
+            Node::Ensure(Ensure { body, ensure, .. }) => {
+                if let Some(child_node) = body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = ensure {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Erange(Erange { left, right, .. }) => {
+                if let Some(child_node) = left {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = right {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::False(False { .. }) => {}
+            // Node::File(File { .. }) => {}
+            Node::FindPattern(FindPattern { elements, .. }) => {
+                for child_node in elements {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Float(Float { .. }) => {}
+            Node::For(For {
+                iterator,
+                iteratee,
+                body,
+                ..
+            }) => {
+                self.serialize(iterator, documents, fuzzy_scope, input);
+                self.serialize(iteratee, documents, fuzzy_scope, input);
+
+                for child_node in body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::ForwardArg(ForwardArg { .. }) => {}
+            // Node::ForwardedArgs(ForwardedArgs { .. }) => {}
+            Node::Gvar(Gvar { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "usage",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Gvar",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Gvasgn(Gvasgn {
+                name,
+                value,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Gvasgn",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Hash(Hash { pairs, .. }) => {
+                for child_node in pairs {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::HashPattern(HashPattern { elements, .. }) => {
+                for child_node in elements {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Heredoc(Heredoc { parts, .. }) => {
+                for child_node in parts {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::If(If {
+                cond,
+                if_true,
+                if_false,
+                ..
+            }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+
+                if let Some(child_node) = if_true {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = if_false {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::IfGuard(IfGuard { cond, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+            }
+
+            Node::IFlipFlop(IFlipFlop { left, right, .. }) => {
+                if let Some(child_node) = left {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = right {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::IfMod(IfMod {
+                cond,
+                if_true,
+                if_false,
+                ..
+            }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+
+                if let Some(child_node) = if_true {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = if_false {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::IfTernary(IfTernary {
+                cond,
+                if_true,
+                if_false,
+                ..
+            }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+                self.serialize(if_true, documents, fuzzy_scope, input);
+                self.serialize(if_false, documents, fuzzy_scope, input);
+            }
+
+            Node::Index(lib_ruby_parser::nodes::Index { recv, indexes, .. }) => {
+                self.serialize(recv, documents, fuzzy_scope, input);
+
+                for child_node in indexes {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::IndexAsgn(IndexAsgn {
+                recv,
+                indexes,
+                value,
+                ..
+            }) => {
+                self.serialize(recv, documents, fuzzy_scope, input);
+
+                for child_node in indexes {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::InPattern(InPattern {
+                pattern,
+                guard,
+                body,
+                ..
+            }) => {
+                self.serialize(pattern, documents, fuzzy_scope, input);
+
+                if let Some(child_node) = guard {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = body {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Int(Int { .. }) => {}
+            Node::Irange(Irange { left, right, .. }) => {
+                if let Some(child_node) = left {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(child_node) = right {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Ivar(Ivar { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "usage",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Ivar",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Ivasgn(Ivasgn {
+                name,
+                value,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Ivasgn",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Kwarg(Kwarg { name, name_l, .. }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Kwarg",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Kwargs(Kwargs { pairs, .. }) => {
+                for node in pairs {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::KwBegin(KwBegin { statements, .. }) => {
+                for node in statements {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Kwnilarg(Kwnilarg { .. }) => {}
+            Node::Kwoptarg(Kwoptarg {
+                name,
+                default,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Kwoptarg",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                self.serialize(default, documents, fuzzy_scope, input);
+            }
+
+            Node::Kwrestarg(Kwrestarg { name, name_l, .. }) => {
+                if let Some(node_name) = name {
+                    if let Some(loc) = name_l {
+                        let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
+                        let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+
+                        documents.push(FuzzyNode {
+                            category: "assignment",
+                            fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            name: node_name.to_string(),
+                            node_type: "Kwrestarg",
+                            line: lineno,
+                            start_column: begin_pos,
+                            end_column: end_pos,
+                        });
+                    }
+                }
+            }
+
+            Node::Kwsplat(Kwsplat { value, .. }) => {
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            // Node::Lambda(Lambda { .. }) => {}
+            // Node::Line(Line { .. }) => {}
+            Node::Lvar(Lvar { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "usage",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Lvar",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Lvasgn(Lvasgn {
+                name,
+                value,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Lvasgn",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                if let Some(child_node) = value {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Masgn(Masgn { lhs, rhs, .. }) => {
+                self.serialize(lhs, documents, fuzzy_scope, input);
+                self.serialize(rhs, documents, fuzzy_scope, input);
+            }
+
+            Node::MatchAlt(MatchAlt { lhs, rhs, .. }) => {
+                self.serialize(lhs, documents, fuzzy_scope, input);
+                self.serialize(rhs, documents, fuzzy_scope, input);
+            }
+
+            Node::MatchAs(MatchAs { value, as_, .. }) => {
+                self.serialize(value, documents, fuzzy_scope, input);
+                self.serialize(as_, documents, fuzzy_scope, input);
+            }
+
+            Node::MatchCurrentLine(MatchCurrentLine { re, .. }) => {
+                self.serialize(re, documents, fuzzy_scope, input);
+            }
+
+            // Node::MatchNilPattern(MatchNilPattern { .. }) => {}
+            Node::MatchPattern(MatchPattern { value, pattern, .. }) => {
+                self.serialize(value, documents, fuzzy_scope, input);
+                self.serialize(pattern, documents, fuzzy_scope, input);
+            }
+
+            Node::MatchPatternP(MatchPatternP { value, pattern, .. }) => {
+                self.serialize(value, documents, fuzzy_scope, input);
+                self.serialize(pattern, documents, fuzzy_scope, input);
+            }
+
+            Node::MatchRest(MatchRest { name, .. }) => {
+                if let Some(child_node) = name {
+                    self.serialize(child_node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::MatchVar(MatchVar { name, name_l, .. }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "MatchVar",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::MatchWithLvasgn(MatchWithLvasgn { re, value, .. }) => {
+                self.serialize(re, documents, fuzzy_scope, input);
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            Node::Mlhs(Mlhs { items, .. }) => {
+                for node in items {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Module(Module { name, body, .. }) => {
+                if let Node::Const(const_node) = *name.to_owned() {
+                    let (lineno, begin_pos) = input
+                        .line_col_for_pos(const_node.expression_l.begin)
+                        .unwrap();
+                    let (_lineno, end_pos) =
+                        input.line_col_for_pos(const_node.expression_l.end).unwrap();
+                    let class_name = const_node.name.to_string();
+
+                    documents.push(FuzzyNode {
+                        category: "assignment",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: class_name.clone(),
+                        node_type: "Module",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+
+                    fuzzy_scope.push(class_name);
+
+                    for child_node in body {
+                        self.serialize(child_node, documents, fuzzy_scope, input);
+                    }
+
+                    fuzzy_scope.pop();
+                }
+            }
+
+            Node::Next(Next { args, .. }) => {
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Nil(Nil { .. }) => {}
+            // Node::NthRef(NthRef { .. }) => {}
+            Node::Numblock(Numblock { call, body, .. }) => {
+                self.serialize(call, documents, fuzzy_scope, input);
+                self.serialize(body, documents, fuzzy_scope, input);
+            }
+
+            Node::OpAsgn(OpAsgn { recv, value, .. }) => {
+                self.serialize(recv, documents, fuzzy_scope, input);
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            Node::Optarg(Optarg {
+                name,
+                default,
+                name_l,
+                ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Optarg",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+
+                self.serialize(default, documents, fuzzy_scope, input);
+            }
+
+            Node::Or(Or { lhs, rhs, .. }) => {
+                self.serialize(lhs, documents, fuzzy_scope, input);
+                self.serialize(rhs, documents, fuzzy_scope, input);
+            }
+
+            Node::OrAsgn(OrAsgn { recv, value, .. }) => {
+                self.serialize(recv, documents, fuzzy_scope, input);
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            Node::Pair(Pair { key, value, .. }) => {
+                self.serialize(key, documents, fuzzy_scope, input);
+                self.serialize(value, documents, fuzzy_scope, input);
+            }
+
+            Node::Pin(Pin { var, .. }) => {
+                self.serialize(var, documents, fuzzy_scope, input);
+            }
+
+            Node::Postexe(Postexe { body, .. }) => {
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Preexe(Preexe { body, .. }) => {
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Procarg0(Procarg0 { args, .. }) => {
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Rational(Rational { .. }) => {}
+            // Node::Redo(Redo { .. }) => {}
+            Node::Regexp(Regexp { parts, options, .. }) => {
+                for node in parts {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                for node in options {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::RegOpt(RegOpt { .. }) => {}
+            Node::Rescue(Rescue {
+                body,
+                rescue_bodies,
+                ..
+            }) => {
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                for node in rescue_bodies {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::RescueBody(RescueBody {
+                exc_list,
+                exc_var,
+                body,
+                ..
+            }) => {
+                for node in exc_list {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                for node in exc_var {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Restarg(Restarg { name, name_l, .. }) => {
+                if let Some(name_str) = name {
+                    if let Some(loc) = name_l {
+                        let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
+                        let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+
+                        documents.push(FuzzyNode {
+                            category: "assignment",
+                            fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            name: name_str.to_string(),
+                            node_type: "Restarg",
+                            line: lineno,
+                            start_column: begin_pos,
+                            end_column: end_pos,
+                        });
+                    }
+                }
+            }
+
+            // Node::Retry(Retry { .. }) => {}
+            Node::Return(Return { args, .. }) => {
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::SClass(SClass { expr, body, .. }) => {
+                self.serialize(expr, documents, fuzzy_scope, input);
+
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Self_(Self_ { .. }) => {}
+            Node::Send(Send {
+                recv,
+                method_name,
+                args,
+                selector_l,
+                ..
+            }) => {
+                if let Some(node) = recv {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                if let Some(loc) = selector_l {
+                    let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(loc.end).unwrap();
+
+                    documents.push(FuzzyNode {
+                        category: "usage",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: method_name.to_string(),
+                        node_type: "Send",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+                }
+
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+
+                match method_name.as_str() {
+                    // Ruby
+                    "attr_accessor" | "attr_reader" | "attr_writer" => {
+                        for node in args {
+                            match node {
+                                Node::Sym(Sym {
+                                    name, expression_l, ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        name: name.to_string_lossy(),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "alias_method" => {
+                        if let Some(node) = args.first() {
+                            match node {
+                                Node::Sym(Sym {
+                                    name, expression_l, ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        name: name.to_string_lossy(),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                Node::Str(Str {
+                                    value,
+                                    expression_l,
+                                    ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        name: value.to_string_lossy(),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    // Rails
+                    "belongs_to" | "has_one" | "has_many" | "has_and_belongs_to_many" => {
+                        if let Some(node) = args.first() {
+                            match node {
+                                Node::Sym(Sym {
+                                    name, expression_l, ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        name: name.to_string_lossy(),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {} // todo: the code below works, but it will pollute searches too
+                            // much unless filtering is added when searching
+
+                            // Rspec
+                            // "let!" | "let" => {
+                            //     if let Some(arg) = args.first() {
+                            //         match node {
+                            //             Node::Sym(Sym { name, expression_l, .. }) => {
+                            //                 let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                            //                 let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                            //                 documents.push(FuzzyNode {
+                            //                     category: "assignment",
+                            //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            //                     name: name.to_string_lossy(),
+                            //                     node_type: "Def",
+                            //                     line: lineno,
+                            //                     start_column: begin_pos,
+                            //                     end_column: end_pos,
+                            //                 });
+                            //             },
+                            //             _ => {}
+                            //         }
+                            //     }
+                           // },
+                            // _ => {}
+                }
+            }
+
+            Node::Shadowarg(Shadowarg { name, expression_l }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "assignment",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string(),
+                    node_type: "Shadowarg",
+                    line: lineno,
+                    start_column: begin_pos,
+                    end_column: end_pos,
+                });
+            }
+
+            Node::Splat(Splat { value, .. }) => {
+                for node in value {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            // Node::Str(Str { .. }) => {}
+            Node::Super(Super {
+                args, keyword_l, ..
+            }) => {
+                if let Some(last_scope_name) = fuzzy_scope.last() {
+                    let (lineno, begin_pos) = input.line_col_for_pos(keyword_l.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(keyword_l.end).unwrap();
+
+                    documents.push(FuzzyNode {
+                        category: "usage",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: last_scope_name.to_string(),
+                        node_type: "Super",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+                }
+
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
+            }
+
+            Node::Sym(Sym {
+                name, expression_l, ..
+            }) => {
+                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                documents.push(FuzzyNode {
+                    category: "usage",
+                    fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    name: name.to_string_lossy(),
                     node_type: "Send",
                     line: lineno,
                     start_column: begin_pos,
@@ -2474,281 +2685,89 @@ fn serialize(
                 });
             }
 
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-
-            match method_name.as_str() {
-                // Ruby
-                "attr_accessor" | "attr_reader" | "attr_writer" => {
-                    for node in args {
-                        match node {
-                            Node::Sym(Sym {
-                                name, expression_l, ..
-                            }) => {
-                                let (lineno, begin_pos) =
-                                    input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) =
-                                    input.line_col_for_pos(expression_l.end).unwrap();
-
-                                documents.push(FuzzyNode {
-                                    category: "assignment",
-                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                    name: name.to_string_lossy(),
-                                    node_type: "Def",
-                                    line: lineno,
-                                    start_column: begin_pos,
-                                    end_column: end_pos,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+            // Node::True(True { .. }) => {}
+            Node::Undef(Undef { names, .. }) => {
+                for node in names {
+                    self.serialize(node, documents, fuzzy_scope, input);
                 }
-                "alias_method" => {
-                    if let Some(node) = args.first() {
-                        match node {
-                            Node::Sym(Sym {
-                                name, expression_l, ..
-                            }) => {
-                                let (lineno, begin_pos) =
-                                    input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) =
-                                    input.line_col_for_pos(expression_l.end).unwrap();
+            }
 
-                                documents.push(FuzzyNode {
-                                    category: "assignment",
-                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                    name: name.to_string_lossy(),
-                                    node_type: "Def",
-                                    line: lineno,
-                                    start_column: begin_pos,
-                                    end_column: end_pos,
-                                });
-                            }
-                            Node::Str(Str {
-                                value,
-                                expression_l,
-                                ..
-                            }) => {
-                                let (lineno, begin_pos) =
-                                    input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) =
-                                    input.line_col_for_pos(expression_l.end).unwrap();
+            Node::UnlessGuard(UnlessGuard { cond, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+            }
 
-                                documents.push(FuzzyNode {
-                                    category: "assignment",
-                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                    name: value.to_string_lossy(),
-                                    node_type: "Def",
-                                    line: lineno,
-                                    start_column: begin_pos,
-                                    end_column: end_pos,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+            Node::Until(Until { cond, body, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
                 }
-                // Rails
-                "belongs_to" | "has_one" | "has_many" | "has_and_belongs_to_many" => {
-                    if let Some(node) = args.first() {
-                        match node {
-                            Node::Sym(Sym {
-                                name, expression_l, ..
-                            }) => {
-                                let (lineno, begin_pos) =
-                                    input.line_col_for_pos(expression_l.begin).unwrap();
-                                let (_lineno, end_pos) =
-                                    input.line_col_for_pos(expression_l.end).unwrap();
+            }
 
-                                documents.push(FuzzyNode {
-                                    category: "assignment",
-                                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                    name: name.to_string_lossy(),
-                                    node_type: "Def",
-                                    line: lineno,
-                                    start_column: begin_pos,
-                                    end_column: end_pos,
-                                });
-                            }
-                            _ => {}
-                        }
-                    }
+            Node::UntilPost(UntilPost { cond, body, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+                self.serialize(body, documents, fuzzy_scope, input);
+            }
+
+            Node::When(When { patterns, body, .. }) => {
+                for node in patterns {
+                    self.serialize(node, documents, fuzzy_scope, input);
                 }
-                _ => {} // todo: the code below works, but it will pollute searches too
-                        // much unless filtering is added when searching
 
-                        // Rspec
-                        // "let!" | "let" => {
-                        //     if let Some(arg) = args.first() {
-                        //         match node {
-                        //             Node::Sym(Sym { name, expression_l, .. }) => {
-                        //                 let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                        //                 let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-                        //                 documents.push(FuzzyNode {
-                        //                     category: "assignment",
-                        //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
-                        //                     name: name.to_string_lossy(),
-                        //                     node_type: "Def",
-                        //                     line: lineno,
-                        //                     start_column: begin_pos,
-                        //                     end_column: end_pos,
-                        //                 });
-                        //             },
-                        //             _ => {}
-                        //         }
-                        //     }
-                        // },
-                        // _ => {}
-            }
-        }
-
-        Node::Shadowarg(Shadowarg { name, expression_l }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "assignment",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string(),
-                node_type: "Shadowarg",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        Node::Splat(Splat { value, .. }) => {
-            for node in value {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        // Node::Str(Str { .. }) => {}
-        Node::Super(Super {
-            args, keyword_l, ..
-        }) => {
-            if let Some(last_scope_name) = fuzzy_scope.last() {
-                let (lineno, begin_pos) = input.line_col_for_pos(keyword_l.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(keyword_l.end).unwrap();
-
-                documents.push(FuzzyNode {
-                    category: "usage",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: last_scope_name.to_string(),
-                    node_type: "Super",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
             }
 
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
+            Node::While(While { cond, body, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
 
-        Node::Sym(Sym {
-            name, expression_l, ..
-        }) => {
-            let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-            let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-            documents.push(FuzzyNode {
-                category: "usage",
-                fuzzy_ruby_scope: fuzzy_scope.clone(),
-                name: name.to_string_lossy(),
-                node_type: "Send",
-                line: lineno,
-                start_column: begin_pos,
-                end_column: end_pos,
-            });
-        }
-
-        // Node::True(True { .. }) => {}
-        Node::Undef(Undef { names, .. }) => {
-            for node in names {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::UnlessGuard(UnlessGuard { cond, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-        }
-
-        Node::Until(Until { cond, body, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
-            }
-        }
-
-        Node::UntilPost(UntilPost { cond, body, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-            serialize(body, documents, fuzzy_scope, input);
-        }
-
-        Node::When(When { patterns, body, .. }) => {
-            for node in patterns {
-                serialize(node, documents, fuzzy_scope, input);
+                for node in body {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
             }
 
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
+            Node::WhilePost(WhilePost { cond, body, .. }) => {
+                self.serialize(cond, documents, fuzzy_scope, input);
+                self.serialize(body, documents, fuzzy_scope, input);
             }
-        }
 
-        Node::While(While { cond, body, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-
-            for node in body {
-                serialize(node, documents, fuzzy_scope, input);
+            Node::XHeredoc(XHeredoc { parts, .. }) => {
+                for node in parts {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
             }
-        }
 
-        Node::WhilePost(WhilePost { cond, body, .. }) => {
-            serialize(cond, documents, fuzzy_scope, input);
-            serialize(body, documents, fuzzy_scope, input);
-        }
-
-        Node::XHeredoc(XHeredoc { parts, .. }) => {
-            for node in parts {
-                serialize(node, documents, fuzzy_scope, input);
+            Node::Xstr(Xstr { parts, .. }) => {
+                for node in parts {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
             }
-        }
 
-        Node::Xstr(Xstr { parts, .. }) => {
-            for node in parts {
-                serialize(node, documents, fuzzy_scope, input);
+            Node::Yield(Yield { args, .. }) => {
+                for node in args {
+                    self.serialize(node, documents, fuzzy_scope, input);
+                }
             }
-        }
 
-        Node::Yield(Yield { args, .. }) => {
-            for node in args {
-                serialize(node, documents, fuzzy_scope, input);
+            Node::ZSuper(ZSuper { expression_l, .. }) => {
+                if let Some(last_scope_name) = fuzzy_scope.last() {
+                    let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
+                    let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
+
+                    documents.push(FuzzyNode {
+                        category: "usage",
+                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        name: last_scope_name.to_string(),
+                        node_type: "ZSuper",
+                        line: lineno,
+                        start_column: begin_pos,
+                        end_column: end_pos,
+                    });
+                }
             }
-        }
 
-        Node::ZSuper(ZSuper { expression_l, .. }) => {
-            if let Some(last_scope_name) = fuzzy_scope.last() {
-                let (lineno, begin_pos) = input.line_col_for_pos(expression_l.begin).unwrap();
-                let (_lineno, end_pos) = input.line_col_for_pos(expression_l.end).unwrap();
-
-                documents.push(FuzzyNode {
-                    category: "usage",
-                    fuzzy_ruby_scope: fuzzy_scope.clone(),
-                    name: last_scope_name.to_string(),
-                    node_type: "ZSuper",
-                    line: lineno,
-                    start_column: begin_pos,
-                    end_column: end_pos,
-                });
-            }
-        }
-
-        _ => {}
-    };
+            _ => {}
+        };
+    }
 }

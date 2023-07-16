@@ -102,7 +102,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let persistence = self.persistence.lock().await;
+        let mut persistence = self.persistence.lock().await;
         let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
 
         let change_diagnostics =
@@ -126,7 +126,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let persistence = self.persistence.lock().await;
+        let mut persistence = self.persistence.lock().await;
         let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
 
         for content_change in &params.content_changes {
@@ -152,7 +152,7 @@ impl LanguageServer for Backend {
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
-        let persistence = self.persistence.lock().await;
+        let mut persistence = self.persistence.lock().await;
         let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
         let change_diagnostics =
             persistence.reindex_modified_file(&params.text.unwrap(), &params.text_document.uri);
