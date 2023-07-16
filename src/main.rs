@@ -65,14 +65,10 @@ impl LanguageServer for Backend {
         tokio::spawn(async move {
             loop {
                 let mut persistence = background_persistence.lock().await;
-
-                persistence.reindex_modified_files();
-
-                // if !persistence.gems_already_indexed() {
-                //     persistence.index_gems();
-                // }
-
+                let _ = persistence.reindex_modified_files();
+                let _ = persistence.index_gems();
                 drop(persistence);
+
                 tokio::time::sleep(Duration::from_secs(120)).await
             }
         });

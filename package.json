@@ -51,7 +51,13 @@
             "ram"
           ],
           "default": "tempdir",
-          "description": "Set if the search index should be purely in-mmemory (ram) or swapped to disk with mmap (tempdir)"
+          "description": "Set if the search index should be purely in-mmemory (ram) or swapped to disk with mmap (tempdir)."
+        },
+        "fuzzyRubyServer.indexGems": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "description": "Set if gems are included in the search index."
         }
       }
     }

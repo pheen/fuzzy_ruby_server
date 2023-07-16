@@ -270,10 +270,6 @@ impl Persistence {
         })
     }
 
-    pub fn gems_already_indexed(&self) -> bool {
-        self.gems_indexed
-    }
-
     pub fn initialize(&mut self, params: &InitializeParams) {
         let uri = params.root_uri.as_ref().unwrap_or_else(|| {
             info!("root_uri wasn't given to initialize, exiting.");
@@ -296,6 +292,11 @@ impl Persistence {
                 info!("Unknown allocation_type, defaulting to tempdir");
                 Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
             }
+        };
+
+        let skip_indexing_gems = !user_config.get("indexGems").unwrap().as_bool().unwrap();
+        if skip_indexing_gems {
+            self.gems_indexed = true;
         }
     }
 
@@ -405,6 +406,8 @@ impl Persistence {
     }
 
     pub fn index_gems(&mut self) -> tantivy::Result<()> {
+        if self.gems_indexed { return Ok(()) }
+
         // Four leading spaces dictates that it's a gem version
         // https://github.com/rubygems/bundler/blob/v2.1.4/lib/bundler/lockfile_parser.rb#L174-L181
         let gem_version = Regex::new(r"^\s{4}([a-zA-Z\d\.\-_]+)\s\(([\d\w\.\-_]+)\)").unwrap();
