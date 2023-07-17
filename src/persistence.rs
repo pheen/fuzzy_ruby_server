@@ -359,10 +359,10 @@ impl Persistence {
         }
 
         if let Some(index) = &self.index {
+            let files_added = new_indexable_file_paths.len() > 0;
             let files_deleted = self.indexed_file_paths.len() > 0;
-            let files_added = files_deleted && new_indexable_file_paths.len() > 0;
 
-            if files_deleted || files_added {
+            if files_added || files_deleted {
                 let mut index_writer = index.writer(100_000_000).unwrap();
 
                 for path in &self.indexed_file_paths {
