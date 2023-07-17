@@ -9,7 +9,7 @@
 		"url": "https://github.com/pheen/fuzzy_ruby_vscode_client"
 	},
 	"license": "MIT",
-	"version": "0.7.0",
+	"version": "0.7.1",
 	"engines": {
 		"vscode": "^1.65.0"
 	},
