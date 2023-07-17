@@ -8,7 +8,7 @@ use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
 use log::info;
 use phf::phf_map;
 use tower_lsp::lsp_types::InitializeParams;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
@@ -143,7 +143,7 @@ pub struct Persistence {
     index: Option<Index>,
     workspace_path: String,
     last_reindex_time: i64,
-    indexed_file_paths: Vec<String>,
+    indexed_file_paths: HashSet<String>,
     process_id: Option<u32>,
     no_workspace: bool,
     gems_indexed: bool,
@@ -250,7 +250,7 @@ impl Persistence {
         let index = None;
         let workspace_path = "unset".to_string();
         let last_reindex_time = FileTime::from_unix_time(0, 0).seconds();
-        let indexed_file_paths = Vec::new();
+        let indexed_file_paths = HashSet::new();
         let process_id: Option<u32> = None;
         let no_workspace = false;
         let gems_indexed = false;
@@ -335,9 +335,8 @@ impl Persistence {
             },
         );
 
-        let mut visible_file_paths = Vec::new();
-        let mut new_indexable_file_paths = Vec::new();
-        // let mut deletable_file_paths = Vec::new();
+        let mut new_indexable_file_paths = HashSet::new();
+        let mut indexed_file_paths = HashSet::new();
 
         for entry in walk_dir {
             let path = entry.unwrap().path();
@@ -345,67 +344,62 @@ impl Persistence {
             let ruby_file = path.ends_with(".rb");
 
             if ruby_file {
-                visible_file_paths.push(path.to_string());
+                indexed_file_paths.insert(path.to_string());
+                self.indexed_file_paths.remove(path);
 
                 let metadata = fs::metadata(path).unwrap();
+
                 let mtime = FileTime::from_last_modification_time(&metadata);
                 let recently_modified = mtime.seconds() >= last_reindex_time;
 
                 if recently_modified {
-                    new_indexable_file_paths.push(path.to_string());
+                    new_indexable_file_paths.insert(path.to_string());
                 }
             }
         }
 
-        // for path in &self.indexed_file_paths {
-        //     if !&visible_file_paths.contains(path) {
-        //         deletable_file_paths.push(path);
-        //     }
-        // }
-
         if let Some(index) = &self.index {
-            let mut index_writer = index.writer(100_000_000).unwrap();
+            let files_deleted = self.indexed_file_paths.len() > 0;
+            let files_added = files_deleted && new_indexable_file_paths.len() > 0;
 
-            // for path in deletable_file_paths {
-            //     let relative_path = path.replace(&self.workspace_path, "");
+            if files_deleted || files_added {
+                let mut index_writer = index.writer(100_000_000).unwrap();
 
-            //     info!("Deleting relative path: {:#?}", relative_path);
+                for path in &self.indexed_file_paths {
+                    let relative_path = path.replace(&self.workspace_path, "");
 
-            //     let file_path_id = blake3::hash(&relative_path.as_bytes());
-            //     let path_term = Term::from_field_text(
-            //         self.schema_fields.file_path_id,
-            //         &file_path_id.to_string(),
-            //     );
+                    let file_path_id = blake3::hash(&relative_path.as_bytes());
+                    let path_term = Term::from_field_text(
+                        self.schema_fields.file_path_id,
+                        &file_path_id.to_string(),
+                    );
 
-            //     index_writer.delete_term(path_term);
-            // }
+                    index_writer.delete_term(path_term);
+                }
 
-            // index_writer.delete_all_documents();
-            // index_writer.commit();
+                for path in &new_indexable_file_paths {
+                    let text = fs::read_to_string(&path).unwrap();
+                    let uri = Url::from_file_path(&path).unwrap();
+                    let relative_path = uri.path().replace(&self.workspace_path, "");
 
-            for path in &new_indexable_file_paths {
-                // info!("Indexing path:");
-                // info!("{}", path);
+                    self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, true);
+                }
 
-                let text = fs::read_to_string(&path).unwrap();
-                let uri = Url::from_file_path(&path).unwrap();
-                let relative_path = uri.path().replace(&self.workspace_path, "");
-
-                self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, true);
+                index_writer.commit().unwrap();
+                info!("Indexing workspace complete!");
+            } else {
+                info!("No file changes, skipping periodic reindexing.")
             }
-
-            index_writer.commit().unwrap();
         }
 
-        info!("Indexing workspace complete!");
 
         self.last_reindex_time = start_time;
-        self.indexed_file_paths = new_indexable_file_paths;
+        self.indexed_file_paths = indexed_file_paths;
 
         Ok(())
     }
 
-    pub fn index_gems(&mut self) -> tantivy::Result<()> {
+    pub fn index_gems_once(&mut self) -> tantivy::Result<()> {
         if self.gems_indexed { return Ok(()) }
 
         self.index_interface_only = true;

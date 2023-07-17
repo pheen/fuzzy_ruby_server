@@ -2,8 +2,6 @@ mod persistence;
 
 use persistence::Persistence;
 
-use log::info;
-use psutil::process;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::*;
@@ -66,10 +64,10 @@ impl LanguageServer for Backend {
             loop {
                 let mut persistence = background_persistence.lock().await;
                 let _ = persistence.reindex_modified_files();
-                let _ = persistence.index_gems();
+                let _ = persistence.index_gems_once();
                 drop(persistence);
 
-                tokio::time::sleep(Duration::from_secs(120)).await
+                tokio::time::sleep(Duration::from_secs(60)).await
             }
         });
 
