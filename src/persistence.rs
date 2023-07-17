@@ -1629,6 +1629,10 @@ impl Persistence {
 
                     fuzzy_scope.push(class_name);
 
+                    if let Some(scope_node) = const_node.scope {
+                        self.serialize(&scope_node, documents, fuzzy_scope, input);
+                    }
+
                     if let Some(superclass_node) = superclass {
                         self.serialize(superclass_node, documents, fuzzy_scope, input);
                     }
