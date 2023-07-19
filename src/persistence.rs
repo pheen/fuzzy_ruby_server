@@ -4,7 +4,7 @@ use filetime::FileTime;
 use regex::Regex;
 use jwalk::WalkDirGeneric;
 use lib_ruby_parser::source::DecodedInput;
-use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions};
+use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions, Loc};
 use log::info;
 use phf::phf_map;
 use tower_lsp::lsp_types::InitializeParams;
@@ -148,6 +148,7 @@ pub struct Persistence {
     no_workspace: bool,
     gems_indexed: bool,
     index_interface_only: bool,
+    class_scope: Vec<String>,
 }
 
 struct SchemaFields {
@@ -155,6 +156,7 @@ struct SchemaFields {
     file_path: Field,
     category_field: Field,
     fuzzy_ruby_scope_field: Field,
+    class_scope_field: Field,
     name_field: Field,
     node_type_field: Field,
     line_field: Field,
@@ -168,6 +170,7 @@ struct SchemaFields {
 struct FuzzyNode<'a> {
     category: &'a str,
     fuzzy_ruby_scope: Vec<String>,
+    class_scope: Vec<String>,
     name: String,
     node_type: &'a str,
     line: usize,
@@ -219,6 +222,16 @@ impl Persistence {
                     )
                     .set_stored(),
             ),
+            class_scope_field: schema_builder.add_text_field(
+                "class_scope",
+                TextOptions::default()
+                    .set_indexing_options(
+                        TextFieldIndexing::default()
+                            .set_tokenizer("raw")
+                            .set_index_option(IndexRecordOption::Basic),
+                    )
+                    .set_stored(),
+            ),
             name_field: schema_builder.add_text_field(
                 "name",
                 TextOptions::default()
@@ -255,6 +268,7 @@ impl Persistence {
         let no_workspace = false;
         let gems_indexed = false;
         let index_interface_only = false;
+        let class_scope = vec![];
 
         Ok(Self {
             schema,
@@ -267,6 +281,7 @@ impl Persistence {
             no_workspace,
             gems_indexed,
             index_interface_only,
+            class_scope,
         })
     }
 
@@ -435,10 +450,6 @@ impl Persistence {
                     if let Some(captures) = gem_version.captures(line) {
                         let name = captures[1].to_string();
                         let version = captures[2].to_string();
-
-                        info!("gem name: {}", name);
-                        info!("gem version: {}", version);
-
                         let gem_folder_name = format!("{}/gems/{}-{}", base_gem_path, name, version);
                         // Not 100% sure where this newline is coming from. `gemfile_contents.lines()` I think.
                         let gem_folder_name = gem_folder_name.replace("\n", "");
@@ -567,6 +578,10 @@ impl Persistence {
                     fuzzy_doc.add_text(self.schema_fields.fuzzy_ruby_scope_field, fuzzy_scope);
                 }
 
+                for class_scope in document.class_scope {
+                    fuzzy_doc.add_text(self.schema_fields.class_scope_field, class_scope);
+                }
+
                 fuzzy_doc.add_text(
                     self.schema_fields.category_field,
                     document.category.to_string(),
@@ -652,6 +667,10 @@ impl Persistence {
 
                 for fuzzy_scope in document.fuzzy_ruby_scope {
                     fuzzy_doc.add_text(self.schema_fields.fuzzy_ruby_scope_field, fuzzy_scope);
+                }
+
+                for class_scope in document.class_scope {
+                    fuzzy_doc.add_text(self.schema_fields.class_scope_field, class_scope);
                 }
 
                 fuzzy_doc.add_text(
@@ -815,7 +834,33 @@ impl Persistence {
 
             match usage_type {
                 // "Alias" => {},
-                // "Const" => {},
+                "Const" => {
+                    for scope_name in usage_fuzzy_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Should, scope_query));
+                    }
+
+                    let class_scope = retrieved_doc.get_all(self.schema_fields.class_scope_field);
+
+                    for scope_name in class_scope {
+                        let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        queries.push((Occur::Must, scope_query));
+                    }
+                },
                 // "CSend" => {},
                 // todo: improved indexed scopes so there is a separate class scope, etc
                 // "Cvar" => {},
@@ -1424,6 +1469,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "assignment",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: sym.name.to_string_lossy(),
                         node_type: "Alias",
                         line: lineno,
@@ -1439,6 +1485,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: sym.name.to_string_lossy(),
                         node_type: "Alias",
                         line: lineno,
@@ -1465,6 +1512,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Arg",
                     line: lineno,
@@ -1578,7 +1626,8 @@ impl Persistence {
                 name_l,
                 ..
             }) => {
-                // todo: improve fuzzy_scope by using scope
+                let const_node = Const { scope: scope.to_owned(), name: "".to_string(), double_colon_l: None, name_l: Loc { begin: 0, end: 0 }, expression_l: Loc { begin: 0, end: 0 } };
+                let node_class_scope = self.build_class_scope(&const_node);
 
                 let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
                 let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
@@ -1586,6 +1635,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: node_class_scope,
                     name: name.to_string(),
                     node_type: "Casgn",
                     line: lineno,
@@ -1610,6 +1660,14 @@ impl Persistence {
                 ..
             }) => {
                 if let Node::Const(const_node) = *name.to_owned() {
+                    // loop over names and add to fuzzy/class_scope
+                    let node_class_scope = self.build_class_scope(&const_node);
+                    let class_scope_len = node_class_scope.len();
+
+                    for ancestor_name in node_class_scope {
+                        fuzzy_scope.push(ancestor_name);
+                    }
+
                     let (lineno, begin_pos) = input
                         .line_col_for_pos(const_node.expression_l.begin)
                         .unwrap();
@@ -1617,17 +1675,22 @@ impl Persistence {
                         input.line_col_for_pos(const_node.expression_l.end).unwrap();
                     let class_name = const_node.name.to_string();
 
-                    documents.push(FuzzyNode {
+                    let document = FuzzyNode {
                         category: "assignment",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        // class_scope: node_class_scope,
+                        class_scope: vec![],
                         name: class_name.clone(),
                         node_type: "Class",
                         line: lineno,
                         start_column: begin_pos,
                         end_column: end_pos,
-                    });
+                    };
 
-                    fuzzy_scope.push(class_name);
+                    documents.push(document);
+
+                    fuzzy_scope.push(class_name.to_string());
+                    self.class_scope.push(class_name);
 
                     if let Some(scope_node) = const_node.scope {
                         self.serialize(&scope_node, documents, fuzzy_scope, input);
@@ -1641,7 +1704,12 @@ impl Persistence {
                         self.serialize(child_node, documents, fuzzy_scope, input);
                     }
 
+                    for _ in 0..class_scope_len {
+                        fuzzy_scope.pop();
+                    }
+
                     fuzzy_scope.pop();
+                    self.class_scope.pop();
                 }
             }
 
@@ -1652,20 +1720,24 @@ impl Persistence {
                 name_l,
                 ..
             }) => {
-                // todo: improve fuzzy_scope by using scope
+                let const_node = Const { scope: scope.to_owned(), name: "".to_string(), double_colon_l: None, name_l: Loc { begin: 0, end: 0 }, expression_l: Loc { begin: 0, end: 0 } };
+                let node_class_scope = self.build_class_scope(&const_node);
 
                 let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
                 let (_lineno, end_pos) = input.line_col_for_pos(name_l.end).unwrap();
 
-                documents.push(FuzzyNode {
+                let document = FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: node_class_scope,
                     name: name.to_string(),
                     node_type: "Const",
                     line: lineno,
                     start_column: begin_pos,
                     end_column: end_pos,
-                });
+                };
+
+                documents.push(document);
 
                 if let Some(child_node) = scope {
                     self.serialize(child_node, documents, fuzzy_scope, input);
@@ -1693,6 +1765,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: method_name.to_string(),
                         node_type: "CSend",
                         line: lineno,
@@ -1715,6 +1788,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Cvar",
                     line: lineno,
@@ -1735,6 +1809,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Cvasgn",
                     line: lineno,
@@ -1760,6 +1835,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Def",
                     line: lineno,
@@ -1799,6 +1875,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Defs",
                     line: lineno,
@@ -1900,6 +1977,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Gvar",
                     line: lineno,
@@ -1920,6 +1998,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Gvasgn",
                     line: lineno,
@@ -2069,6 +2148,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Ivar",
                     line: lineno,
@@ -2089,6 +2169,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Ivasgn",
                     line: lineno,
@@ -2108,6 +2189,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Kwarg",
                     line: lineno,
@@ -2141,6 +2223,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Kwoptarg",
                     line: lineno,
@@ -2160,6 +2243,7 @@ impl Persistence {
                         documents.push(FuzzyNode {
                             category: "assignment",
                             fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            class_scope: vec![],
                             name: node_name.to_string(),
                             node_type: "Kwrestarg",
                             line: lineno,
@@ -2183,6 +2267,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Lvar",
                     line: lineno,
@@ -2203,6 +2288,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Lvasgn",
                     line: lineno,
@@ -2258,6 +2344,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "MatchVar",
                     line: lineno,
@@ -2279,6 +2366,13 @@ impl Persistence {
 
             Node::Module(Module { name, body, .. }) => {
                 if let Node::Const(const_node) = *name.to_owned() {
+                    let node_class_scope = self.build_class_scope(&const_node);
+                    let class_scope_len = node_class_scope.len();
+
+                    for ancestor_name in node_class_scope {
+                        fuzzy_scope.push(ancestor_name);
+                    }
+
                     let (lineno, begin_pos) = input
                         .line_col_for_pos(const_node.expression_l.begin)
                         .unwrap();
@@ -2289,6 +2383,8 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "assignment",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        // class_scope: node_class_scope,
+                        class_scope: vec![],
                         name: class_name.clone(),
                         node_type: "Module",
                         line: lineno,
@@ -2296,13 +2392,19 @@ impl Persistence {
                         end_column: end_pos,
                     });
 
-                    fuzzy_scope.push(class_name);
+                    fuzzy_scope.push(class_name.to_string());
+                    self.class_scope.push(class_name);
 
                     for child_node in body {
                         self.serialize(child_node, documents, fuzzy_scope, input);
                     }
 
+                    for _ in 0..class_scope_len {
+                        fuzzy_scope.pop();
+                    }
+
                     fuzzy_scope.pop();
+                    self.class_scope.pop();
                 }
             }
 
@@ -2336,6 +2438,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Optarg",
                     line: lineno,
@@ -2438,6 +2541,7 @@ impl Persistence {
                         documents.push(FuzzyNode {
                             category: "assignment",
                             fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            class_scope: vec![],
                             name: name_str.to_string(),
                             node_type: "Restarg",
                             line: lineno,
@@ -2482,6 +2586,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: method_name.to_string(),
                         node_type: "Send",
                         line: lineno,
@@ -2510,6 +2615,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: vec![],
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2535,6 +2641,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: vec![],
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2555,6 +2662,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: vec![],
                                         name: value.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2581,6 +2689,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: vec![],
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2606,6 +2715,7 @@ impl Persistence {
                             //                 documents.push(FuzzyNode {
                             //                     category: "assignment",
                             //                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                            // class_scope: vec![],
                             //                     name: name.to_string_lossy(),
                             //                     node_type: "Def",
                             //                     line: lineno,
@@ -2628,6 +2738,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "assignment",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string(),
                     node_type: "Shadowarg",
                     line: lineno,
@@ -2653,6 +2764,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: last_scope_name.to_string(),
                         node_type: "Super",
                         line: lineno,
@@ -2675,6 +2787,7 @@ impl Persistence {
                 documents.push(FuzzyNode {
                     category: "usage",
                     fuzzy_ruby_scope: fuzzy_scope.clone(),
+                    class_scope: vec![],
                     name: name.to_string_lossy(),
                     node_type: "Send",
                     line: lineno,
@@ -2756,6 +2869,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
+                        class_scope: vec![],
                         name: last_scope_name.to_string(),
                         node_type: "ZSuper",
                         line: lineno,
@@ -2767,5 +2881,51 @@ impl Persistence {
 
             _ => {}
         };
+    }
+
+    fn build_class_scope(&self, const_node: &Const) -> Vec<String> {
+        let mut node_class_scope = vec![];
+        let mut current_node = &const_node.scope;
+
+        loop {
+            match current_node {
+                Some(node) => {
+                    match node.as_ref() {
+                        Node::Const(Const {
+                            name,
+                            scope,
+                            ..
+                        }) => {
+                            node_class_scope.push(name.to_string());
+                            current_node = scope;
+                        },
+                        Node::Cbase(Cbase { .. }) => {
+                            // let mut root_prefixed_scope = vec!["^^^".to_string()];
+                            // root_prefixed_scope.append(&mut node_class_scope);
+
+                            // node_class_scope = root_prefixed_scope;
+                            break
+                        }
+                        Node::Send(Send { .. }) => {
+                            break
+                        }
+                        Node::Self_(Self_ { expression_l: _}) => {
+                            break
+                        }
+                        _ => {
+                            info!("unknown node in build_class_scope");
+                            info!("{:#?}", node);
+                            break
+                        }
+                    }
+                },
+                None => {
+                    // node_class_scope.should = self.class_scope.clone();
+                    break
+                }
+            }
+        }
+
+        node_class_scope
     }
 }
