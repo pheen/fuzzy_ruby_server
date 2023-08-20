@@ -1,9 +1,10 @@
-![icon](https://user-images.githubusercontent.com/1145873/192818122-8bdaee87-c2d9-4073-a53a-ace5f040f902.png)
+<p align="center">
+  <img src="https://github.com/pheen/fuzzy_ruby_server/assets/1145873/c44cb013-6d14-4559-bc33-6c6673998fcd">
+</p>
+
 # Fuzzy Ruby Server
 
 A Ruby language server designed to stay performant for large codebases. A full-text search backend gives fast, but fuzzy search results that approximates the behaviour of Ruby.
-
-&nbsp;
 
 | Features  |  |
 | ------------- | ------------- |
@@ -26,7 +27,6 @@ A Ruby language server designed to stay performant for large codebases. A full-t
 #### Gem Support
 If you use [rbenv](https://github.com/rbenv/rbenv) and a `Gemfile.lock` is present in the root of the workspace, then dependencies are automatically indexed as well. This can take a few minutes when there are a lot of gems to index.
 
-
 &nbsp;
 ## Features
 <a id="definitions"></a>
@@ -41,7 +41,6 @@ Peek or go to the definition of a variable, method, class, or module. If multipl
 
 ![go_to_def](https://user-images.githubusercontent.com/1145873/177204185-281c7d77-6894-41e8-92c0-69110169bed5.gif)
 
-&nbsp;
 <a id="definition-search"></a>
 ### Definition Search
 Search method, class, and module definitions in a project.
@@ -51,15 +50,12 @@ Search method, class, and module definitions in a project.
 
 ![workspace-symbols](https://user-images.githubusercontent.com/1145873/224568569-abeafb04-6efb-447c-8d36-f348400c72cb.gif)
 
-
-&nbsp;
 <a id="diagnostics"></a>
 ### Diagnostics
 Highlight issues found in static analysis.
 
 ![diagnostics](https://user-images.githubusercontent.com/1145873/177204213-777bde3e-5628-4e8c-96d7-e8629050a60e.gif)
 
-&nbsp;
 <a id="references"></a>
 ### References
 See all the locations where a method/variable/symbol is being used. Only locations in the the file being edited are shown currently.
@@ -69,14 +65,12 @@ See all the locations where a method/variable/symbol is being used. Only locatio
 
 ![references](https://user-images.githubusercontent.com/1145873/177204235-5888f7ee-b638-4a7e-8a7a-80f8c2ecc327.gif)
 
-&nbsp;
 <a id="highlights"></a>
 ### Highlights
 See all occurrences of a method/variable/symbol in the current editor.
 
 ![highlight](https://user-images.githubusercontent.com/1145873/177204231-4ccd8b81-ce3c-41f4-b393-146f444307f8.gif)
 
-&nbsp;
 <a id="rename"></a>
 ### Rename
 Rename all occurrences within a file
@@ -86,7 +80,6 @@ Rename all occurrences within a file
 
 ![rename](https://user-images.githubusercontent.com/1145873/177204249-73415e9d-c473-4a3c-9347-694ad3647d50.gif)
 
-&nbsp;
 ## Contributing
 - Update the `command` path in `extension.ts` to point to your local working directory. Target release as it's necessary or indexing is too slow.
   - E.g., `command = "/Users/<user>/dev/fuzzy_ruby_vscode_client/target/release/fuzzy";`.
