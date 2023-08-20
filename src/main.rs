@@ -67,7 +67,7 @@ impl LanguageServer for Backend {
                 let _ = persistence.index_gems_once();
                 drop(persistence);
 
-                tokio::time::sleep(Duration::from_secs(60)).await
+                tokio::time::sleep(Duration::from_secs(120)).await
             }
         });
 
