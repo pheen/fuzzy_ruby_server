@@ -54,6 +54,7 @@ export async function activate(_context: ExtensionContext) {
     initializationOptions: {
       allocationType: client_config.get("allocationType"),
       indexGems: client_config.get("indexGems"),
+      reportDiagnostics: client_config.get("reportDiagnostics"),
     },
   };
 

@@ -58,6 +58,12 @@
           "type": "boolean",
           "default": true,
           "description": "Set if gems are included in the search index."
+        },
+        "fuzzyRubyServer.reportDiagnostics": {
+          "scope": "window",
+          "type": "boolean",
+          "default": true,
+          "description": "Set if diagnostics should be shown."
         }
       }
     }

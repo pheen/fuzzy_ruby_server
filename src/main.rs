@@ -114,58 +114,29 @@ impl LanguageServer for Backend {
             }
         }
 
-        self.client
-            .publish_diagnostics(
-                params.text_document.uri,
-                diagnostics,
-                Some(params.text_document.version),
-            )
-            .await;
+
+        if persistence.report_diagnostics {
+            self.client
+                .publish_diagnostics(
+                    params.text_document.uri,
+                    diagnostics,
+                    Some(params.text_document.version),
+                )
+                .await;
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let mut persistence = self.persistence.lock().await;
-        let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
 
         for content_change in &params.content_changes {
-            let change_diagnostics =
-                &persistence.reindex_modified_file(&content_change.text, &params.text_document.uri);
-
-            for diagnostic in change_diagnostics {
-                for unwrapped_diagnostic in diagnostic {
-                    if let Some(finally_diagnostic) = unwrapped_diagnostic {
-                        diagnostics.push(finally_diagnostic.to_owned());
-                    }
-                }
-            }
+            persistence.reindex_modified_file(&self.client, &content_change.text, &params.text_document.uri).await;
         }
-
-        self.client
-            .publish_diagnostics(
-                params.text_document.uri,
-                diagnostics,
-                Some(params.text_document.version),
-            )
-            .await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let mut persistence = self.persistence.lock().await;
-        let mut diagnostics: Vec<tower_lsp::lsp_types::Diagnostic> = vec![];
-        let change_diagnostics =
-            persistence.reindex_modified_file(&params.text.unwrap(), &params.text_document.uri);
-
-        for diagnostic in change_diagnostics {
-            for unwrapped_diagnostic in diagnostic {
-                if let Some(finally_diagnostic) = unwrapped_diagnostic {
-                    diagnostics.push(finally_diagnostic.to_owned());
-                }
-            }
-        }
-
-        self.client
-            .publish_diagnostics(params.text_document.uri, diagnostics, None)
-            .await;
+        persistence.reindex_modified_file(&self.client, &params.text.unwrap(), &params.text_document.uri).await;
     }
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {

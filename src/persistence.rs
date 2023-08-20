@@ -7,6 +7,7 @@ use lib_ruby_parser::source::DecodedInput;
 use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions, Loc};
 use log::info;
 use phf::phf_map;
+use tower_lsp::Client;
 use tower_lsp::lsp_types::InitializeParams;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -149,6 +150,7 @@ pub struct Persistence {
     gems_indexed: bool,
     index_interface_only: bool,
     class_scope: Vec<String>,
+    pub report_diagnostics: bool,
 }
 
 struct SchemaFields {
@@ -269,6 +271,7 @@ impl Persistence {
         let gems_indexed = false;
         let index_interface_only = false;
         let class_scope = vec![];
+        let report_diagnostics = true;
 
         Ok(Self {
             schema,
@@ -282,6 +285,7 @@ impl Persistence {
             gems_indexed,
             index_interface_only,
             class_scope,
+            report_diagnostics,
         })
     }
 
@@ -312,6 +316,11 @@ impl Persistence {
         let skip_indexing_gems = !user_config.get("indexGems").unwrap().as_bool().unwrap();
         if skip_indexing_gems {
             self.gems_indexed = true;
+        }
+
+        let report_diagnostics = user_config.get("reportDiagnostics").unwrap().as_bool().unwrap();
+        if !report_diagnostics {
+            self.report_diagnostics = false;
         }
     }
 
@@ -378,7 +387,7 @@ impl Persistence {
             let files_deleted = self.indexed_file_paths.len() > 0;
 
             if files_added || files_deleted {
-                let mut index_writer = index.writer(100_000_000).unwrap();
+                let mut index_writer = index.writer(256_000_000).unwrap();
 
                 for path in &self.indexed_file_paths {
                     let relative_path = path.replace(&self.workspace_path, "");
@@ -470,11 +479,9 @@ impl Persistence {
                 }
             };
 
-            let mut index_writer = index.writer(100_000_000).unwrap();
+            let mut index_writer = index.writer(256_000_000).unwrap();
 
             for gem_path in gem_paths {
-                info!("Starting indexing gem path: {:#?}", gem_path);
-
                 let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone()).process_read_dir(
                     move |_depth, _path, _read_dir_state, children| {
                         children.retain(|dir_entry_result| {
@@ -527,8 +534,6 @@ impl Persistence {
                         self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
                     }
                 }
-
-                info!("Finished indexing gem path: {:#?}", gem_path);
             }
 
             index_writer.commit().unwrap();
@@ -618,23 +623,43 @@ impl Persistence {
         }
     }
 
-    pub fn reindex_modified_file(
+    pub async fn reindex_modified_file(
         &mut self,
+        client: &Client,
         text: &String,
         uri: &Url,
-    ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
-        if let Some(index) = &self.index {
-            let mut index_writer = index.writer(100_000_000)?;
-            let mut documents = Vec::new();
+    ) {
+        let mut documents = Vec::new();
+        let diagnostics = match self.parse(text, &mut documents) {
+            Ok(diagnostics) => diagnostics,
+            Err(diagnostics) => {
+                // Return early so existing documents are not deleted when
+                // there is a syntax error
+                // return Ok(diagnostics);
+                diagnostics
+            }
+        };
 
-            let diagnostics = match self.parse(text, &mut documents) {
-                Ok(diagnostics) => diagnostics,
-                Err(diagnostics) => {
-                    // Return early so existing documents are not deleted when
-                    // there is a syntax error
-                    return Ok(diagnostics);
+        if self.report_diagnostics {
+            let mut reported_diagnostics = vec![];
+
+            for diagnostic in &diagnostics {
+                for unwrapped_diagnostic in diagnostic {
+                    reported_diagnostics.push(unwrapped_diagnostic.clone());
                 }
-            };
+            }
+
+            client
+                .publish_diagnostics(uri.clone(), reported_diagnostics, None).await;
+                // .await;
+        }
+
+        if diagnostics.len() > 0 {
+            return;
+        }
+
+        if let Some(index) = &self.index {
+            let mut index_writer = index.writer_with_num_threads(1, 30_000_000).unwrap();
 
             let user_space: bool;
             let relative_path: String;
@@ -700,14 +725,10 @@ impl Persistence {
                     fuzzy_doc.add_u64(self.schema_fields.columns_field, col as u64);
                 }
 
-                index_writer.add_document(fuzzy_doc)?;
+                index_writer.add_document(fuzzy_doc).unwrap();
             }
 
-            index_writer.commit()?;
-
-            Ok(diagnostics)
-        } else {
-            Ok(vec![])
+            index_writer.commit().unwrap();
         }
     }
 
@@ -717,14 +738,9 @@ impl Persistence {
         _uri: &Url,
     ) -> tantivy::Result<Vec<Option<tower_lsp::lsp_types::Diagnostic>>> {
         let mut documents = Vec::new();
-
-        if let Some(_) = &self.index {
-            match self.parse(text, &mut documents) {
-                Ok(diagnostics) => Ok(diagnostics),
-                Err(diagnostics) => Ok(diagnostics),
-            }
-        } else {
-            Ok(Vec::new())
+        match self.parse(text, &mut documents) {
+            Ok(diagnostics) => Ok(diagnostics),
+            Err(diagnostics) => Ok(diagnostics),
         }
     }
 
