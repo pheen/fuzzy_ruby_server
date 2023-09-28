@@ -17,12 +17,18 @@ export async function activate(_context: ExtensionContext) {
   let command = undefined;
 
   if (process.platform == "darwin") {
-    command = `${base_dir}/bin/fuzzy`;
+    if (process.arch == "arm64") {
+      // Apple
+      command = `${base_dir}/bin/fuzzy_darwin-arm64`;
+    } else {
+    // Apple/Intel
+      command = `${base_dir}/bin/fuzzy`;
+    }
   } else {
     command = `${base_dir}/bin/fuzzy_x86_64-unknown-linux-gnu`;
   }
 
-  // command = "/Users/joelkorpela/dev/fuzzy_ruby_vscode_client/target/release/fuzzy";
+  // command = "/Users/joelkorpela/dev/fuzzy_ruby_server/target/aarch64-apple-darwin/release/fuzzy";
 
   const run: Executable = {
     command,
