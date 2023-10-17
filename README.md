@@ -22,10 +22,7 @@ A Ruby language server designed to stay performant for large codebases. A full-t
 
 **2.** Activate the extension by reloading VSCode and navigating to any `.rb` file.
 
-- The workspace will be indexed automatically.
-
-#### Gem Support
-If you use [rbenv](https://github.com/rbenv/rbenv) and a `Gemfile.lock` is present in the root of the workspace, then dependencies are automatically indexed as well. This can take a few minutes when there are a lot of gems to index.
+- The workspace and gems will be indexed automatically.
 
 &nbsp;
 ## Features

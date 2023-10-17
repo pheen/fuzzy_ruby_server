@@ -9,7 +9,7 @@
   },
   "publisher": "Blinknlights",
   "license": "MIT",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "icon": "images/icon.png",
   "categories": [],
   "keywords": [
@@ -58,6 +58,12 @@
           "type": "boolean",
           "default": true,
           "description": "Set if gems are included in the search index."
+        },
+        "fuzzyRubyServer.includeDirs": {
+          "scope": "window",
+          "type": "array",
+          "default": [],
+          "description": "Additional directories to be indexed. \"interface_only\" controls if only classes and methods should be indexed, defaults to true. Formatted as: [{ path: \"/absolute/path\", interface_only: false }]"
         },
         "fuzzyRubyServer.reportDiagnostics": {
           "scope": "window",

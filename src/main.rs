@@ -64,10 +64,11 @@ impl LanguageServer for Backend {
             loop {
                 let mut persistence = background_persistence.lock().await;
                 let _ = persistence.reindex_modified_files();
+                let _ = persistence.index_included_dirs_once();
                 let _ = persistence.index_gems_once();
                 drop(persistence);
 
-                tokio::time::sleep(Duration::from_secs(120)).await
+                tokio::time::sleep(Duration::from_secs(600)).await
             }
         });
 

@@ -138,6 +138,12 @@ static ASSIGNMENT_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! 
     ],
 };
 
+#[derive(Clone)]
+pub struct IndexableDir {
+    path: String,
+    interface_only: bool,
+}
+
 pub struct Persistence {
     schema: Schema,
     schema_fields: SchemaFields,
@@ -148,8 +154,10 @@ pub struct Persistence {
     process_id: Option<u32>,
     no_workspace: bool,
     gems_indexed: bool,
+    include_dirs_indexed: bool,
     index_interface_only: bool,
     class_scope: Vec<String>,
+    include_dirs: Vec<IndexableDir>,
     pub report_diagnostics: bool,
 }
 
@@ -272,6 +280,8 @@ impl Persistence {
         let index_interface_only = false;
         let class_scope = vec![];
         let report_diagnostics = true;
+        let include_dirs = Vec::new();
+        let include_dirs_indexed = false;
 
         Ok(Self {
             schema,
@@ -286,6 +296,8 @@ impl Persistence {
             index_interface_only,
             class_scope,
             report_diagnostics,
+            include_dirs,
+            include_dirs_indexed,
         })
     }
 
@@ -312,6 +324,27 @@ impl Persistence {
                 Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
             }
         };
+
+        if let Some(included_dirs) = user_config.get("includeDirs") {
+            if let Some(dirs) = included_dirs.as_array() {
+                let dirs = dirs.iter().map(|v| {
+                    // v.as_str().unwrap().to_string()
+                    let dir_params = v.as_object().unwrap();
+                    let dir_path = dir_params.get("path").unwrap().as_str().unwrap();
+                    let interface_only = {
+                        let param = dir_params.get("interface_only");
+                        match param {
+                            Some(val) => val.as_bool().unwrap(),
+                            None => true,
+                        }
+                    };
+
+                    IndexableDir { path: dir_path.to_string(), interface_only }
+                }).collect();
+
+                self.include_dirs = dirs;
+            };
+        }
 
         let skip_indexing_gems = !user_config.get("indexGems").unwrap().as_bool().unwrap();
         if skip_indexing_gems {
@@ -423,6 +456,88 @@ impl Persistence {
         Ok(())
     }
 
+    pub fn index_included_dirs_once(&mut self) -> tantivy::Result<()> {
+        if self.include_dirs_indexed { return Ok(()) }
+
+        self.index_interface_only = true;
+
+        if self.include_dirs.len() > 0 {
+            let index = match &self.index {
+                Some(index) => index,
+                None => {
+                    info!("missing index");
+                    quit::with_code(1);
+                }
+            };
+
+            let mut index_writer = index.writer(256_000_000).unwrap();
+
+            for indexable_dir in self.include_dirs.clone() {
+                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(indexable_dir.path.clone()).process_read_dir(
+            move |_depth, _path, _read_dir_state, children| {
+                        children.retain(|dir_entry_result| {
+                            dir_entry_result
+                                .as_ref()
+                                .map(|dir_entry| {
+                                    if let Some(file_name) = dir_entry.file_name.to_str() {
+                                        let ruby_file = file_name.ends_with(".rb");
+                                        dir_entry.file_type.is_dir() || ruby_file
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false)
+                        });
+
+                        children.iter_mut().for_each(|dir_entry_result| {
+                            if let Ok(dir_entry) = dir_entry_result {
+                                if let Some(file_name) = dir_entry.file_name.to_str() {
+                                    if file_name.contains("node_modules")
+                                        || file_name.contains("vendor")
+                                        || file_name.contains("tmp")
+                                        || file_name.contains(".git")
+                                    {
+                                        dir_entry.read_children_path = None;
+                                    }
+                                }
+                            }
+                        });
+                    },
+                );
+
+                let mut indexable_file_paths = Vec::new();
+
+                for entry in walk_dir {
+                    let path = entry.unwrap().path();
+                    let path = path.to_str().unwrap();
+                    let ruby_file = path.ends_with(".rb");
+
+                    if ruby_file {
+                        indexable_file_paths.push(path.to_string());
+                    }
+                }
+
+                self.index_interface_only = indexable_dir.interface_only;
+
+                for path in &indexable_file_paths {
+                    if let Ok(text) = fs::read_to_string(&path) {
+                        let uri = Url::from_file_path(&path).unwrap();
+                        let relative_path = uri.path().replace(&self.workspace_path, "");
+
+                        self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
+                    }
+                }
+            }
+
+            index_writer.commit().unwrap();
+        }
+
+        self.include_dirs_indexed = true;
+        self.index_interface_only = false;
+
+        Ok(())
+    }
+
     pub fn index_gems_once(&mut self) -> tantivy::Result<()> {
         if self.gems_indexed { return Ok(()) }
 
@@ -469,7 +584,6 @@ impl Persistence {
                     }
                 }
             }
-
 
             let index = match &self.index {
                 Some(index) => index,
