@@ -339,7 +339,15 @@ impl Persistence {
                         }
                     };
 
-                    IndexableDir { path: dir_path.to_string(), interface_only }
+                    let dir_path = dir_path.to_string();
+                    let absolute_dir_path =
+                        if dir_path.starts_with("/") {
+                            dir_path
+                        } else {
+                            format!("{}/{}", &self.workspace_path, dir_path)
+                        };
+
+                    IndexableDir { path: absolute_dir_path, interface_only }
                 }).collect();
 
                 self.include_dirs = dirs;
