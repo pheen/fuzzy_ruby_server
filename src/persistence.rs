@@ -12,7 +12,7 @@ use tower_lsp::lsp_types::InitializeParams;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery, BoostQuery};
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
 use tower_lsp::lsp_types::{
@@ -872,7 +872,6 @@ impl Persistence {
     ) -> tantivy::Result<Vec<Location>> {
         let path = params.text_document.uri.path();
         let relative_path = path.replace(&self.workspace_path, "");
-        info!("{:#?}", relative_path);
 
         let position = params.position;
 
@@ -1020,7 +1019,49 @@ impl Persistence {
                         queries.push((Occur::Must, scope_query));
                     }
                 }
-                // "Send" => {},
+                //
+                "Send" => {
+                    let class_scope = retrieved_doc.get_all(self.schema_fields.class_scope_field);
+
+                    let mut usage_scope_fallback = true;
+
+                    for scope_name in class_scope {
+                        usage_scope_fallback = false;
+
+                        let scope_query = Box::new(TermQuery::new(
+                            Term::from_field_text(
+                                self.schema_fields.fuzzy_ruby_scope_field,
+                                scope_name.as_text().unwrap(),
+                            ),
+                            IndexRecordOption::Basic,
+                        ));
+
+                        let boosted_scope_query: Box<dyn Query> = Box::new(BoostQuery::new(
+                            scope_query, 10000.0
+                        ));
+
+                        // queries.push((Occur::Should, scope_query));
+                        // queries.push((Occur::Should, boosted_scope_query));
+
+                        // This probably would be better as just a boosted
+                        // query, but it's not working for some reason.
+                        queries.push((Occur::Must, boosted_scope_query));
+                    }
+
+                    if usage_scope_fallback {
+                        for scope_name in usage_fuzzy_scope {
+                            let scope_query: Box<dyn Query> = Box::new(TermQuery::new(
+                                Term::from_field_text(
+                                    self.schema_fields.fuzzy_ruby_scope_field,
+                                    scope_name.as_text().unwrap(),
+                                ),
+                                IndexRecordOption::Basic,
+                            ));
+
+                            queries.push((Occur::Should, scope_query));
+                        }
+                    }
+                },
                 // "Super" => {},
                 // "ZSuper" => {},
                 _ => {
@@ -2713,9 +2754,21 @@ impl Persistence {
                 selector_l,
                 ..
             }) => {
-                if let Some(node) = recv {
-                    self.serialize(node, documents, fuzzy_scope, input);
-                }
+                let class_scope =
+                    if let Some(recv_node) = recv {
+                        self.serialize(recv_node, documents, fuzzy_scope, input);
+
+                        match recv_node.as_ref() {
+                            Node::Const(const_node) => {
+                                let mut full_class_scope = vec![const_node.name.to_string()];
+                                full_class_scope.append(self.build_class_scope(&const_node).as_mut());
+                                full_class_scope
+                            }
+                            _ => vec![]
+                        }
+                    } else {
+                        vec![]
+                    };
 
                 if let Some(loc) = selector_l {
                     let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
@@ -2724,7 +2777,7 @@ impl Persistence {
                     documents.push(FuzzyNode {
                         category: "usage",
                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                        class_scope: vec![],
+                        class_scope: class_scope.clone(),
                         name: method_name.to_string(),
                         node_type: "Send",
                         line: lineno,
@@ -2753,7 +2806,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                        class_scope: vec![],
+                                        class_scope: class_scope.clone(),
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2779,7 +2832,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                        class_scope: vec![],
+                                        class_scope: class_scope.clone(),
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2800,7 +2853,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                        class_scope: vec![],
+                                        class_scope: class_scope.clone(),
                                         name: value.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
@@ -2827,7 +2880,7 @@ impl Persistence {
                                     documents.push(FuzzyNode {
                                         category: "assignment",
                                         fuzzy_ruby_scope: fuzzy_scope.clone(),
-                                        class_scope: vec![],
+                                        class_scope: class_scope.clone(),
                                         name: name.to_string_lossy(),
                                         node_type: "Def",
                                         line: lineno,
