@@ -41,11 +41,10 @@ impl LanguageServer for Backend {
 
         tokio::spawn(async move {
             loop {
-                let editor_process_id = params.process_id.unwrap_or_else(|| {
-                    quit::with_code(1)
-                });
+                let editor_process_id = params.process_id.unwrap_or_else(|| quit::with_code(1));
 
-                let editor_process_running = psutil::process::processes().unwrap()
+                let editor_process_running = psutil::process::processes()
+                    .unwrap()
                     .into_iter()
                     .filter_map(|process| process.ok())
                     .find(|process| process.pid() == editor_process_id);
@@ -115,7 +114,6 @@ impl LanguageServer for Backend {
             }
         }
 
-
         if persistence.report_diagnostics {
             self.client
                 .publish_diagnostics(
@@ -131,13 +129,25 @@ impl LanguageServer for Backend {
         let mut persistence = self.persistence.lock().await;
 
         for content_change in &params.content_changes {
-            persistence.reindex_modified_file(&self.client, &content_change.text, &params.text_document.uri).await;
+            persistence
+                .reindex_modified_file(
+                    &self.client,
+                    &content_change.text,
+                    &params.text_document.uri,
+                )
+                .await;
         }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let mut persistence = self.persistence.lock().await;
-        persistence.reindex_modified_file(&self.client, &params.text.unwrap(), &params.text_document.uri).await;
+        persistence
+            .reindex_modified_file(
+                &self.client,
+                &params.text.unwrap(),
+                &params.text_document.uri,
+            )
+            .await;
     }
 
     async fn did_close(&self, _: DidCloseTextDocumentParams) {

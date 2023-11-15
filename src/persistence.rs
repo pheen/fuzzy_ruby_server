@@ -1,25 +1,25 @@
-use std::str;
-use std::process::Command;
 use filetime::FileTime;
-use regex::Regex;
 use jwalk::WalkDirGeneric;
 use lib_ruby_parser::source::DecodedInput;
-use lib_ruby_parser::{nodes::*, Node, Parser, ParserOptions, Loc};
+use lib_ruby_parser::{nodes::*, Loc, Node, Parser, ParserOptions};
 use log::info;
 use phf::phf_map;
-use tower_lsp::Client;
-use tower_lsp::lsp_types::InitializeParams;
+use regex::Regex;
+use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::process::Command;
+use std::str;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery, BoostQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, RegexQuery, TermQuery};
 use tantivy::{schema::*, ReloadPolicy};
 use tantivy::{Index, IndexWriter};
+use tower_lsp::lsp_types::InitializeParams;
 use tower_lsp::lsp_types::{
     DocumentHighlight, DocumentHighlightKind, Location, Position, Range, SymbolInformation,
     SymbolKind, TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
-use serde_json::json;
+use tower_lsp::Client;
 
 static USAGE_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
     "Alias" => &[
@@ -313,16 +313,21 @@ impl Persistence {
         let default_user_config = json!({});
         let default_allocation_type = json!("ram");
 
-        let user_config = &params.initialization_options.as_ref().unwrap_or(&default_user_config).as_object().unwrap();
-        let allocation_type = user_config.get("allocationType").unwrap_or(&default_allocation_type).as_str().unwrap();
+        let user_config = &params
+            .initialization_options
+            .as_ref()
+            .unwrap_or(&default_user_config)
+            .as_object()
+            .unwrap();
+        let allocation_type = user_config
+            .get("allocationType")
+            .unwrap_or(&default_allocation_type)
+            .as_str()
+            .unwrap();
 
         self.index = match allocation_type {
-            "ram" => {
-                Some(Index::create_in_ram(self.schema.clone()))
-            },
-            "tempdir" => {
-                Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
-            }
+            "ram" => Some(Index::create_in_ram(self.schema.clone())),
+            "tempdir" => Some(Index::create_from_tempdir(self.schema.clone()).unwrap()),
             _ => {
                 info!("Unknown allocation_type, defaulting to tempdir");
                 Some(Index::create_from_tempdir(self.schema.clone()).unwrap())
@@ -331,41 +336,54 @@ impl Persistence {
 
         if let Some(included_dirs) = user_config.get("includeDirs") {
             if let Some(dirs) = included_dirs.as_array() {
-                let dirs = dirs.iter().map(|v| {
-                    // v.as_str().unwrap().to_string()
-                    let dir_params = v.as_object().unwrap();
-                    let dir_path = dir_params.get("path").unwrap().as_str().unwrap();
-                    let interface_only = {
-                        let param = dir_params.get("interface_only");
-                        match param {
-                            Some(val) => val.as_bool().unwrap(),
-                            None => true,
-                        }
-                    };
+                let dirs = dirs
+                    .iter()
+                    .map(|v| {
+                        // v.as_str().unwrap().to_string()
+                        let dir_params = v.as_object().unwrap();
+                        let dir_path = dir_params.get("path").unwrap().as_str().unwrap();
+                        let interface_only = {
+                            let param = dir_params.get("interface_only");
+                            match param {
+                                Some(val) => val.as_bool().unwrap(),
+                                None => true,
+                            }
+                        };
 
-                    let dir_path = dir_path.to_string();
-                    let absolute_dir_path =
-                        if dir_path.starts_with("/") {
+                        let dir_path = dir_path.to_string();
+                        let absolute_dir_path = if dir_path.starts_with("/") {
                             dir_path
                         } else {
                             format!("{}/{}", &self.workspace_path, dir_path)
                         };
 
-                    IndexableDir { path: absolute_dir_path, interface_only }
-                }).collect();
+                        IndexableDir {
+                            path: absolute_dir_path,
+                            interface_only,
+                        }
+                    })
+                    .collect();
 
                 self.include_dirs = dirs;
             };
         }
 
         let default_index_gems = json!(true);
-        let skip_indexing_gems = !user_config.get("indexGems").unwrap_or(&default_index_gems).as_bool().unwrap();
+        let skip_indexing_gems = !user_config
+            .get("indexGems")
+            .unwrap_or(&default_index_gems)
+            .as_bool()
+            .unwrap();
         if skip_indexing_gems {
             self.gems_indexed = true;
         }
 
         let default_report_diagnostics = json!(true);
-        let report_diagnostics = user_config.get("reportDiagnostics").unwrap_or(&default_report_diagnostics).as_bool().unwrap();
+        let report_diagnostics = user_config
+            .get("reportDiagnostics")
+            .unwrap_or(&default_report_diagnostics)
+            .as_bool()
+            .unwrap();
         if !report_diagnostics {
             self.report_diagnostics = false;
         }
@@ -453,7 +471,12 @@ impl Persistence {
                     let uri = Url::from_file_path(&path).unwrap();
                     let relative_path = uri.path().replace(&self.workspace_path, "");
 
-                    self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, true);
+                    self.reindex_modified_file_without_commit(
+                        &text,
+                        relative_path,
+                        &index_writer,
+                        true,
+                    );
                 }
 
                 index_writer.commit().unwrap();
@@ -463,7 +486,6 @@ impl Persistence {
             }
         }
 
-
         self.last_reindex_time = start_time;
         self.indexed_file_paths = indexed_file_paths;
 
@@ -471,7 +493,9 @@ impl Persistence {
     }
 
     pub fn index_included_dirs_once(&mut self) -> tantivy::Result<()> {
-        if self.include_dirs_indexed { return Ok(()) }
+        if self.include_dirs_indexed {
+            return Ok(());
+        }
 
         self.index_interface_only = true;
 
@@ -487,8 +511,8 @@ impl Persistence {
             let mut index_writer = index.writer(256_000_000).unwrap();
 
             for indexable_dir in self.include_dirs.clone() {
-                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(indexable_dir.path.clone()).process_read_dir(
-            move |_depth, _path, _read_dir_state, children| {
+                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(indexable_dir.path.clone())
+                    .process_read_dir(move |_depth, _path, _read_dir_state, children| {
                         children.retain(|dir_entry_result| {
                             dir_entry_result
                                 .as_ref()
@@ -516,8 +540,7 @@ impl Persistence {
                                 }
                             }
                         });
-                    },
-                );
+                    });
 
                 let mut indexable_file_paths = Vec::new();
 
@@ -538,7 +561,12 @@ impl Persistence {
                         let uri = Url::from_file_path(&path).unwrap();
                         let relative_path = uri.path().replace(&self.workspace_path, "");
 
-                        self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
+                        self.reindex_modified_file_without_commit(
+                            &text,
+                            relative_path,
+                            &index_writer,
+                            false,
+                        );
                     }
                 }
             }
@@ -553,7 +581,9 @@ impl Persistence {
     }
 
     pub fn index_gems_once(&mut self) -> tantivy::Result<()> {
-        if self.gems_indexed { return Ok(()) }
+        if self.gems_indexed {
+            return Ok(());
+        }
 
         self.index_interface_only = true;
 
@@ -569,7 +599,10 @@ impl Persistence {
             let gem_home_path_result = Command::new("sh")
                 .arg("-c")
                 // .arg(format!("eval \"$(/usr/local/bin/rbenv init -)\" && cd {} && gem environment home", &self.workspace_path))
-                .arg(format!("cd {} && gem environment home", &self.workspace_path))
+                .arg(format!(
+                    "cd {} && gem environment home",
+                    &self.workspace_path
+                ))
                 .output();
 
             if let Ok(gem_home_path) = gem_home_path_result {
@@ -588,7 +621,8 @@ impl Persistence {
                     if let Some(captures) = gem_version.captures(line) {
                         let name = captures[1].to_string();
                         let version = captures[2].to_string();
-                        let gem_folder_name = format!("{}/gems/{}-{}", base_gem_path, name, version);
+                        let gem_folder_name =
+                            format!("{}/gems/{}-{}", base_gem_path, name, version);
                         // Not 100% sure where this newline is coming from. `gemfile_contents.lines()` I think.
                         let gem_folder_name = gem_folder_name.replace("\n", "");
 
@@ -610,8 +644,8 @@ impl Persistence {
             let mut index_writer = index.writer(256_000_000).unwrap();
 
             for gem_path in gem_paths {
-                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone()).process_read_dir(
-                    move |_depth, _path, _read_dir_state, children| {
+                let walk_dir = WalkDirGeneric::<(usize, bool)>::new(gem_path.clone())
+                    .process_read_dir(move |_depth, _path, _read_dir_state, children| {
                         children.retain(|dir_entry_result| {
                             dir_entry_result
                                 .as_ref()
@@ -639,8 +673,7 @@ impl Persistence {
                                 }
                             }
                         });
-                    },
-                );
+                    });
 
                 let mut indexable_file_paths = Vec::new();
 
@@ -659,7 +692,12 @@ impl Persistence {
                         let uri = Url::from_file_path(&path).unwrap();
                         let relative_path = uri.path().replace(&self.workspace_path, "");
 
-                        self.reindex_modified_file_without_commit(&text, relative_path, &index_writer, false);
+                        self.reindex_modified_file_without_commit(
+                            &text,
+                            relative_path,
+                            &index_writer,
+                            false,
+                        );
                     }
                 }
             }
@@ -751,12 +789,7 @@ impl Persistence {
         }
     }
 
-    pub async fn reindex_modified_file(
-        &mut self,
-        client: &Client,
-        text: &String,
-        uri: &Url,
-    ) {
+    pub async fn reindex_modified_file(&mut self, client: &Client, text: &String, uri: &Url) {
         let mut documents = Vec::new();
         let diagnostics = match self.parse(text, &mut documents) {
             Ok(diagnostics) => diagnostics,
@@ -778,8 +811,9 @@ impl Persistence {
             }
 
             client
-                .publish_diagnostics(uri.clone(), reported_diagnostics, None).await;
-                // .await;
+                .publish_diagnostics(uri.clone(), reported_diagnostics, None)
+                .await;
+            // .await;
         }
 
         if diagnostics.len() > 0 {
@@ -1003,7 +1037,7 @@ impl Persistence {
 
                         queries.push((Occur::Must, scope_query));
                     }
-                },
+                }
                 // "CSend" => {},
                 // todo: improved indexed scopes so there is a separate class scope, etc
                 // "Cvar" => {},
@@ -1042,9 +1076,8 @@ impl Persistence {
                             IndexRecordOption::Basic,
                         ));
 
-                        let boosted_scope_query: Box<dyn Query> = Box::new(BoostQuery::new(
-                            scope_query, 10000.0
-                        ));
+                        let boosted_scope_query: Box<dyn Query> =
+                            Box::new(BoostQuery::new(scope_query, 10000.0));
 
                         // queries.push((Occur::Should, scope_query));
                         // queries.push((Occur::Should, boosted_scope_query));
@@ -1067,7 +1100,7 @@ impl Persistence {
                             queries.push((Occur::Should, scope_query));
                         }
                     }
-                },
+                }
                 // "Super" => {},
                 // "ZSuper" => {},
                 _ => {
@@ -1619,7 +1652,8 @@ impl Persistence {
         let diagnostic = || -> Option<tower_lsp::lsp_types::Diagnostic> {
             let (begin_lineno, start_column) =
                 input.line_col_for_pos(parser_diagnostic.loc.begin).unwrap();
-            let (end_lineno, end_column) = input.line_col_for_pos(parser_diagnostic.loc.end).unwrap();
+            let (end_lineno, end_column) =
+                input.line_col_for_pos(parser_diagnostic.loc.end).unwrap();
             let start_position = Position::new(
                 begin_lineno.try_into().unwrap(),
                 start_column.try_into().unwrap(),
@@ -1648,7 +1682,8 @@ impl Persistence {
         match &node {
             Node::Alias(Alias { to, from, .. }) => {
                 if let Node::Sym(sym) = *to.to_owned() {
-                    let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
+                    let (lineno, begin_pos) =
+                        input.line_col_for_pos(sym.expression_l.begin).unwrap();
                     let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
 
                     documents.push(FuzzyNode {
@@ -1664,7 +1699,8 @@ impl Persistence {
                 }
 
                 if let Node::Sym(sym) = *from.to_owned() {
-                    let (lineno, begin_pos) = input.line_col_for_pos(sym.expression_l.begin).unwrap();
+                    let (lineno, begin_pos) =
+                        input.line_col_for_pos(sym.expression_l.begin).unwrap();
                     let (_lineno, end_pos) = input.line_col_for_pos(sym.expression_l.end).unwrap();
 
                     documents.push(FuzzyNode {
@@ -1707,7 +1743,9 @@ impl Persistence {
             }
 
             Node::Args(Args { args, .. }) => {
-                if self.index_interface_only { return; }
+                if self.index_interface_only {
+                    return;
+                }
 
                 for node in args {
                     self.serialize(node, documents, fuzzy_scope, input);
@@ -1742,7 +1780,9 @@ impl Persistence {
             Node::Block(Block {
                 call, args, body, ..
             }) => {
-                if self.index_interface_only { return; }
+                if self.index_interface_only {
+                    return;
+                }
 
                 self.serialize(call, documents, fuzzy_scope, input);
 
@@ -1811,7 +1851,13 @@ impl Persistence {
                 name_l,
                 ..
             }) => {
-                let const_node = Const { scope: scope.to_owned(), name: "".to_string(), double_colon_l: None, name_l: Loc { begin: 0, end: 0 }, expression_l: Loc { begin: 0, end: 0 } };
+                let const_node = Const {
+                    scope: scope.to_owned(),
+                    name: "".to_string(),
+                    double_colon_l: None,
+                    name_l: Loc { begin: 0, end: 0 },
+                    expression_l: Loc { begin: 0, end: 0 },
+                };
                 let node_class_scope = self.build_class_scope(&const_node);
 
                 let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
@@ -1905,7 +1951,13 @@ impl Persistence {
                 name_l,
                 ..
             }) => {
-                let const_node = Const { scope: scope.to_owned(), name: "".to_string(), double_colon_l: None, name_l: Loc { begin: 0, end: 0 }, expression_l: Loc { begin: 0, end: 0 } };
+                let const_node = Const {
+                    scope: scope.to_owned(),
+                    name: "".to_string(),
+                    double_colon_l: None,
+                    name_l: Loc { begin: 0, end: 0 },
+                    expression_l: Loc { begin: 0, end: 0 },
+                };
                 let node_class_scope = self.build_class_scope(&const_node);
 
                 let (lineno, begin_pos) = input.line_col_for_pos(name_l.begin).unwrap();
@@ -2028,7 +2080,9 @@ impl Persistence {
                     end_column: end_pos,
                 });
 
-                if self.index_interface_only { return; }
+                if self.index_interface_only {
+                    return;
+                }
 
                 fuzzy_scope.push(name.to_string());
 
@@ -2068,7 +2122,9 @@ impl Persistence {
                     end_column: end_pos,
                 });
 
-                if self.index_interface_only { return; }
+                if self.index_interface_only {
+                    return;
+                }
 
                 let mut scope_name = "self.".to_owned();
                 scope_name.push_str(name);
@@ -2760,21 +2816,20 @@ impl Persistence {
                 selector_l,
                 ..
             }) => {
-                let class_scope =
-                    if let Some(recv_node) = recv {
-                        self.serialize(recv_node, documents, fuzzy_scope, input);
+                let class_scope = if let Some(recv_node) = recv {
+                    self.serialize(recv_node, documents, fuzzy_scope, input);
 
-                        match recv_node.as_ref() {
-                            Node::Const(const_node) => {
-                                let mut full_class_scope = vec![const_node.name.to_string()];
-                                full_class_scope.append(self.build_class_scope(&const_node).as_mut());
-                                full_class_scope
-                            }
-                            _ => vec![]
+                    match recv_node.as_ref() {
+                        Node::Const(const_node) => {
+                            let mut full_class_scope = vec![const_node.name.to_string()];
+                            full_class_scope.append(self.build_class_scope(&const_node).as_mut());
+                            full_class_scope
                         }
-                    } else {
-                        vec![]
-                    };
+                        _ => vec![],
+                    }
+                } else {
+                    vec![]
+                };
 
                 if let Some(loc) = selector_l {
                     let (lineno, begin_pos) = input.line_col_for_pos(loc.begin).unwrap();
@@ -2987,7 +3042,7 @@ impl Persistence {
                             //             _ => {}
                             //         }
                             //     }
-                           // },
+                            // },
                             // _ => {}
                 }
             }
@@ -3152,37 +3207,29 @@ impl Persistence {
             match current_node {
                 Some(node) => {
                     match node.as_ref() {
-                        Node::Const(Const {
-                            name,
-                            scope,
-                            ..
-                        }) => {
+                        Node::Const(Const { name, scope, .. }) => {
                             node_class_scope.push(name.to_string());
                             current_node = scope;
-                        },
+                        }
                         Node::Cbase(Cbase { .. }) => {
                             // let mut root_prefixed_scope = vec!["^^^".to_string()];
                             // root_prefixed_scope.append(&mut node_class_scope);
 
                             // node_class_scope = root_prefixed_scope;
-                            break
+                            break;
                         }
-                        Node::Send(Send { .. }) => {
-                            break
-                        }
-                        Node::Self_(Self_ { expression_l: _}) => {
-                            break
-                        }
+                        Node::Send(Send { .. }) => break,
+                        Node::Self_(Self_ { expression_l: _ }) => break,
                         _ => {
                             info!("unknown node in build_class_scope");
                             info!("{:#?}", node);
-                            break
+                            break;
                         }
                     }
-                },
+                }
                 None => {
                     // node_class_scope.should = self.class_scope.clone();
-                    break
+                    break;
                 }
             }
         }
