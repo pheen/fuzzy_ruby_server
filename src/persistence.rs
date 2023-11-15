@@ -12,7 +12,7 @@ use std::process::Command;
 use std::str;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, RegexQuery, TermQuery};
-use tantivy::{schema::*, ReloadPolicy};
+use tantivy::{schema::*, ReloadPolicy, Document};
 use tantivy::{Index, IndexWriter};
 use tower_lsp::lsp_types::InitializeParams;
 use tower_lsp::lsp_types::{
@@ -1230,7 +1230,7 @@ impl Persistence {
     pub fn find_references(
         &self,
         params: TextDocumentPositionParams,
-    ) -> tantivy::Result<Vec<tantivy::Document>> {
+    ) -> tantivy::Result<Vec<Document>> {
         let path = params.text_document.uri.path();
         let relative_path = path.replace(&self.workspace_path, "");
 
@@ -1401,7 +1401,7 @@ impl Persistence {
     pub fn find_references_in_workspace(
         &self,
         query: String,
-    ) -> tantivy::Result<Vec<tantivy::Document>> {
+    ) -> tantivy::Result<Vec<Document>> {
         if let Some(index) = &self.index {
             let reader = index
                 .reader_builder()
@@ -1458,7 +1458,7 @@ impl Persistence {
     pub fn documents_to_locations(
         &self,
         path: &str,
-        documents: Vec<tantivy::Document>,
+        documents: Vec<Document>,
     ) -> Vec<Location> {
         let mut locations = Vec::new();
 
@@ -1495,7 +1495,7 @@ impl Persistence {
     pub fn rename_tokens(
         &self,
         path: &str,
-        documents: Vec<tantivy::Document>,
+        documents: Vec<Document>,
         new_name: &String,
     ) -> WorkspaceEdit {
         let mut edits = Vec::new();
@@ -1537,7 +1537,7 @@ impl Persistence {
 
     pub fn documents_to_symbol_information(
         &self,
-        documents: Vec<tantivy::Document>,
+        documents: Vec<Document>,
     ) -> Vec<SymbolInformation> {
         let mut symbol_infos = Vec::new();
 
