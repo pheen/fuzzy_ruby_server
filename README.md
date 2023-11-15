@@ -87,12 +87,17 @@ Rename all occurrences within a file
 
 &nbsp;
 ## Publishing
-- Build a release binary:
+- Build an Apple Intel release binary:
 ```
-cargo build --release
+cargo build --target x86_64-apple-darwin
 ```
 
-- Build a linux binary for Codespaces:
+- Build an Apple Silicon binary:
+```
+cargo build --release --target=aarch64-apple-darwin
+```
+
+- Build a Linux binary:
 ```
 brew tap messense/macos-cross-toolchains
 brew install x86_64-unknown-linux-gnu
