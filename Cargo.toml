@@ -26,6 +26,7 @@ jwalk = "0.8.1"
 quit = "2.0.0"
 psutil = "3.2.2"
 regex = "1.7.1"
+serde_json = "1.0.108"
 # which = "4.4.0"
 # shells = "0.2.0"
 
