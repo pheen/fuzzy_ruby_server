@@ -2792,7 +2792,70 @@ impl Persistence {
 
                 match method_name.as_str() {
                     // Ruby
-                    "attr_accessor" | "attr_reader" | "attr_writer" => {
+                    "attr_accessor" => {
+                        for node in args {
+                            match node {
+                                Node::Sym(Sym {
+                                    name, expression_l, ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: class_scope.clone(),
+                                        name: name.to_string_lossy(),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: class_scope.clone(),
+                                        name: format!("{}=", name.to_string_lossy()),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "attr_writer" => {
+                        for node in args {
+                            match node {
+                                Node::Sym(Sym {
+                                    name, expression_l, ..
+                                }) => {
+                                    let (lineno, begin_pos) =
+                                        input.line_col_for_pos(expression_l.begin).unwrap();
+                                    let (_lineno, end_pos) =
+                                        input.line_col_for_pos(expression_l.end).unwrap();
+
+                                    documents.push(FuzzyNode {
+                                        category: "assignment",
+                                        fuzzy_ruby_scope: fuzzy_scope.clone(),
+                                        class_scope: class_scope.clone(),
+                                        name: format!("{}=", name.to_string_lossy()),
+                                        node_type: "Def",
+                                        line: lineno,
+                                        start_column: begin_pos,
+                                        end_column: end_pos,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "attr_reader" => {
                         for node in args {
                             match node {
                                 Node::Sym(Sym {
@@ -2865,6 +2928,7 @@ impl Persistence {
                             }
                         }
                     }
+
                     // Rails
                     "belongs_to" | "has_one" | "has_many" | "has_and_belongs_to_many" => {
                         if let Some(node) = args.first() {
