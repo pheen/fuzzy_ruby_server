@@ -4,7 +4,7 @@
 
 # Fuzzy Ruby Server
 
-A Ruby language server designed to stay performant for large codebases. A full-text search backend gives fast, but fuzzy search results that approximates the behaviour of Ruby.
+A Ruby language server designed to stay performant for large codebases. A full-text search backend gives fast, but fuzzy search results that closely approximates the behaviour of Ruby.
 
 | Features  |  |
 | ------------- | ------------- |
@@ -18,11 +18,16 @@ A Ruby language server designed to stay performant for large codebases. A full-t
 
 &nbsp;
 ## Installation
+
+The workspace and gems will be indexed automatically after installing:
+
+#### VSCode
 **1.** Install the `Fuzzy Ruby Server` extension from the VSCode Marketplace.
 
 **2.** Activate the extension by reloading VSCode and navigating to any `.rb` file.
 
-- The workspace and gems will be indexed automatically.
+#### Neovim
+**1.** See the nvim [config example here](https://github.com/pheen/fuzzy_ruby_server/wiki/Neomvim-Install).
 
 &nbsp;
 ## Features
@@ -77,6 +82,7 @@ Rename all occurrences within a file
 
 ![rename](https://user-images.githubusercontent.com/1145873/177204249-73415e9d-c473-4a3c-9347-694ad3647d50.gif)
 
+&nbsp;
 ## Contributing
 - Update the `command` path in `extension.ts` to point to your local working directory. Target release as it's necessary or indexing is too slow.
   - E.g., `command = "/Users/<user>/dev/fuzzy_ruby_vscode_client/target/release/fuzzy";`.
