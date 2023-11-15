@@ -19,6 +19,7 @@ use tower_lsp::lsp_types::{
     DocumentHighlight, DocumentHighlightKind, Location, Position, Range, SymbolInformation,
     SymbolKind, TextDocumentPositionParams, TextEdit, Url, WorkspaceEdit,
 };
+use serde_json::json;
 
 static USAGE_TYPE_RESTRICTIONS: phf::Map<&'static str, &[&str]> = phf_map! {
     "Alias" => &[
@@ -309,8 +310,11 @@ impl Persistence {
 
         self.workspace_path = uri.path().to_string();
 
-        let user_config = &params.initialization_options.as_ref().unwrap().as_object().unwrap();
-        let allocation_type = user_config.get("allocationType").unwrap().as_str().unwrap();
+        let default_user_config = json!({});
+        let default_allocation_type = json!("ram");
+
+        let user_config = &params.initialization_options.as_ref().unwrap_or(&default_user_config).as_object().unwrap();
+        let allocation_type = user_config.get("allocationType").unwrap_or(&default_allocation_type).as_str().unwrap();
 
         self.index = match allocation_type {
             "ram" => {
@@ -354,12 +358,14 @@ impl Persistence {
             };
         }
 
-        let skip_indexing_gems = !user_config.get("indexGems").unwrap().as_bool().unwrap();
+        let default_index_gems = json!(true);
+        let skip_indexing_gems = !user_config.get("indexGems").unwrap_or(&default_index_gems).as_bool().unwrap();
         if skip_indexing_gems {
             self.gems_indexed = true;
         }
 
-        let report_diagnostics = user_config.get("reportDiagnostics").unwrap().as_bool().unwrap();
+        let default_report_diagnostics = json!(true);
+        let report_diagnostics = user_config.get("reportDiagnostics").unwrap_or(&default_report_diagnostics).as_bool().unwrap();
         if !report_diagnostics {
             self.report_diagnostics = false;
         }
