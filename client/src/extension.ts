@@ -24,6 +24,8 @@ export async function activate(_context: ExtensionContext) {
     // Apple/Intel
       command = `${base_dir}/bin/fuzzy`;
     }
+  } else if ("windows") {
+    command = `${base_dir}/bin/fuzzy.exe`;
   } else {
     command = `${base_dir}/bin/fuzzy_x86_64-unknown-linux-gnu`;
   }

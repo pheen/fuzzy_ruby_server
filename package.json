@@ -85,7 +85,7 @@
     "@types/glob": "^7.1.3",
     "@types/mocha": "^8.0.0",
     "@types/node": "^12.12.0",
-    "@types/vscode": "^1.44.0",
+    "@types/vscode": "^1.84.2",
     "@typescript-eslint/eslint-plugin": "^3.8.0",
     "@typescript-eslint/parser": "^3.8.0",
     "cross-env": "^7.0.2",
@@ -97,6 +97,8 @@
     "ts-loader": "^8.0.12",
     "typescript": "^4.4.3",
     "vscode-test": "^1.4.0",
-    "vscode-uri": "^3.0.2"
+    "vscode-uri": "^3.0.2",
+    "vscode": "^1.1.37",
+    "vscode-languageclient": "^9.0.1"
   }
 }

@@ -1,6 +1,7 @@
 mod persistence;
 
 use persistence::Persistence;
+use tasklist::tasklist;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -40,6 +41,7 @@ impl LanguageServer for Backend {
         drop(persistence);
 
         tokio::spawn(async move {
+            #[cfg(not(target_family = "windows"))]
             loop {
                 let editor_process_id = params.process_id.unwrap_or_else(|| quit::with_code(1));
 
@@ -55,6 +57,24 @@ impl LanguageServer for Backend {
 
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
+            #[cfg(target_family = "Windows")]
+            loop {
+                use tasklist;
+
+                let editor_process_id = params.process_id.unwrap_or_else(|| quit::with_code(1));
+
+                let editor_process_running = unsafe {
+                    let mut tl = tasklist::Tasklist::new();
+                    tl.any(|process| process.get_pid() == editor_process_id)
+                };
+
+                if !editor_process_running {
+                    quit::with_code(1);
+                }
+
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+
         });
 
         let background_persistence = Arc::clone(&self.persistence);
